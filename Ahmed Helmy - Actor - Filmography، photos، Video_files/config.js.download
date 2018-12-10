@@ -1,0 +1,156 @@
+define(
+	   {
+  "SV": {
+    "svData": [
+      {
+        "svKey": "logoImg",
+        "svType": "Image",
+        "value": "1"
+      }, 
+      {
+        "svKey": "replayBtnColor",
+        "svType": "Image",
+        "value": "7"
+      },   
+      {
+        "svKey": "numFrame",
+        "svType": "String",
+        "value": "3"
+      },  
+      { 
+        "svKey": "text_size",
+        "svType": "String",
+        "value": "15"
+      },
+		{
+        "svKey": "offer_enabled",
+        "svType": "String",
+        "value": "Disable"
+      },
+
+	  {
+        "svKey": "headline_1",
+        "svType": "String",
+        "value": ""
+      },
+	  {
+        "svKey": "headline_2",
+        "svType": "String",
+        "value": ""
+      },
+      {
+        "svKey": "headline_3",
+        "svType": "String",
+        "value": ""
+      },
+      {
+        "svKey": "headline_4",
+        "svType": "String",
+        "value": ""
+      },
+      {
+        "svKey": "headline_5",
+        "svType": "String",
+        "value": ""
+      },
+	  {
+        "svKey": "terms",
+        "svType": "String",
+        "value": "تُطبق الشروط والاحكام"
+      },
+      {
+        "svKey": "cta",
+        "svType": "String",
+        "value": "اكتشف المزيد"
+      },
+	  {
+        "svKey": "ctaAdjustment",
+        "svType": "String",
+        "value": "20"
+      },
+      {
+        "svKey": "car_1",
+        "svType": "Image",
+        "value": "2"
+      },
+      {
+        "svKey": "car_2",
+        "svType": "Image",
+        "value": "3"
+      },
+      {
+        "svKey": "car_3",
+        "svType": "Image",
+        "value": "4"
+      },
+      {
+        "svKey": "car_4",
+        "svType": "Image",
+        "value": "5"
+      },
+      {
+        "svKey": "car_5",
+        "svType": "Image",
+        "value": "6"
+      },
+      {
+        "svKey": "ShowVideo",
+        "svType": "String",
+        "value": "no"
+      },
+      {
+        "svKey": "Video",
+        "svType": "Video",
+        "value": "8"
+      },
+{
+        "svKey": "ShowDealer",
+        "svType": "String",
+        "value": "no"
+      },
+ {
+        "svKey": "dealership1",
+        "svType": "String",
+        "value": ""
+      },
+ {
+        "svKey": "dealership2",
+        "svType": "String",
+        "value": ""
+      }
+    ]
+  },
+		"AdditionalAssets": [{
+              "OrdinalNumber": 1,
+              "FileName": ""
+        },
+		{
+              "OrdinalNumber": 2,
+              "FileName": ""
+        },
+		{
+              "OrdinalNumber": 3,
+              "FileName": ""
+        },
+		{
+              "OrdinalNumber": 4,
+              "FileName": ""
+        },
+		{
+              "OrdinalNumber": 5,
+              "FileName": ""
+        },
+		{
+              "OrdinalNumber": 6,
+              "FileName": ""
+        },
+		{
+              "OrdinalNumber": 8,
+              "FileName": ""
+        },
+		{
+              "OrdinalNumber": 7,
+              "FileName": ""
+        }
+      ]
+});

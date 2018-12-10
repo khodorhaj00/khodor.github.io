@@ -1,0 +1,86 @@
+// *************************************************************
+//   This class is part of the  Sizmek HTML5 DCO Advanced Block 
+//   ALL RIGHTS RESERVED TO © 2014 Sizmek, Inc.
+// *************************************************************
+// *************************************************************
+
+dco_Advanced_Block = function () {
+    // Establish Reference to d method
+	this.d;
+	// Save Reference to Script Name 
+	var scriptName		= "DCO_Advanced";
+	// Script Version
+	var scriptVersion	= "2.0.0";
+	// Last Modified
+	var lastModified	= "2016-3-08";
+    // Establish Boolean for Tracking
+    this.trackOnce = true;
+    // Establish Reference to this
+    var self = this;
+    // Call Init Method
+    adkit.onReady( function () { self.init(); } );
+};
+
+dco_Advanced_Block.prototype = {
+	// Function That Creates Element Var
+    d: function (id) { return document.getElementById(id); },
+    
+	// Initialize DCO Block
+    init: function () {
+    	// Set Up Ad Tracking
+		this.setUpAd();
+		// Handle AdKit Data 
+		startDCO();
+		this.updateDCO();    	
+    },
+    
+    // DO NOT REMOVE THE FOLLOWING 
+    // Track Ad Features - accepts interaction name and impression type
+    trackAdFeatures: function(_interaction, _noun) { 
+    	// Establish var to track local mode
+    	var isServed;
+    	// Verify ad is not local
+    	try { isServed = EB._isServingMode(); } catch (err) {};
+    	
+		if (isServed && trackOnce) { 
+			try {	
+				// Update Boolean
+				trackOnce = false;		 
+				// Grab Ad ID
+				var adId = EB._adConfig.adId;
+				// Grab Session ID
+				var sId = EB._adConfig.sID; 
+				// Build Tracking Pixel
+				var trackingPixel = "https://bs.serving-sys.com/BurstingPipe/adServer.bs?cn=tf&c=19&mc=imp&pli=16479316&PluID=0&ord=%time%&rtu=-1&pcp=$$sID=" + sId + "|adID=" + adId + "|interactionName=" + _interaction + "|noun=" + _noun + "$$"; 
+				// Fire Tracking Pixel by creating a new image.
+				new Image().src = trackingPixel; 
+				
+			}  catch (err) {}
+		}
+    },   
+    
+    startAd: function () {
+	    // Set Up Ad Tracking
+		this.setUpAd();
+		// Handle AdKit Data 
+		this.updateDCO();
+    },
+    
+    updateDCO: function() {
+    	// Handle Feature Tracking
+		this.trackAdFeatures('impression', 'AF_DCO_Advanced_6176');
+    },
+    
+    // Handle Ad Set Up
+    setUpAd: function () {
+    	// Establish Reference to script
+    	var self = this;
+    	// Add listener to Ad for Clickthrough
+	    this.d("clickThrough").addEventListener('click', function(e){ console.log('click'); EB.clickthrough(); }, false);
+		this.d("cta").addEventListener('click', function(e){ console.log('click'); EB.clickthrough(); }, false);
+		this.d("replay").addEventListener('click', function(e){ console.log('clickReplay'); setAnimation(); }, false);
+    }
+};
+
+var new_DCO_Block = new dco_Advanced_Block ();
+
