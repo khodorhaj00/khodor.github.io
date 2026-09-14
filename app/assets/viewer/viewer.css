@@ -1,0 +1,30 @@
+:root {
+  --bg-top: #1B1F26;
+  --bg-bottom: #0E1013;
+  color-scheme: dark;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-bottom);
+  /* Renderer clears to transparent; the gradient behind it is the page background. */
+  background-image: linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+canvas {
+  display: block;
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  outline: none;
+}

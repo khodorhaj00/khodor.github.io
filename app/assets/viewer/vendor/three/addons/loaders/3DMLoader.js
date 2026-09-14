@@ -1634,11 +1634,20 @@ function Rhino3dmWorker() {
 
 				}
 
+				faces.delete();
+
 				if ( mesh.faces().count > 0 ) {
 
 					mesh.compact();
 					geometry = meshToThreejs( mesh );
-					faces.delete();
+
+				} else {
+
+					// PATCH(no-mesh): the file carries no cached render mesh for this Brep
+					// ("Save small" or script-generated). Report it so the app can offer server meshing.
+					mesh.delete();
+					postNoMeshWarning( 'Brep', _attributes.id );
+					return;
 
 				}
 
@@ -1654,6 +1663,12 @@ function Rhino3dmWorker() {
 
 					geometry = meshToThreejs( mesh );
 					mesh.delete();
+
+				} else {
+
+					// PATCH(no-mesh): see Brep case above.
+					postNoMeshWarning( 'Extrusion', _attributes.id );
+					return;
 
 				}
 
@@ -1778,6 +1793,22 @@ function Rhino3dmWorker() {
 			} );
 
 		}
+
+	}
+
+	// PATCH(no-mesh): a Brep with zero meshed faces or an Extrusion without a mesh is
+	// reported as `{ type: 'no mesh', objectType, guid, message }` (lands in
+	// object.userData.warnings on the main thread). See PATCHES.md.
+	function postNoMeshWarning( objectType, guid ) {
+
+		self.postMessage( { type: 'warning', id: taskID, data: {
+			message: `THREE.3DMLoader: ${objectType} ${guid} has no render mesh (file saved with "Save small" or written by a script).`,
+			type: 'no mesh',
+			objectType: objectType,
+			guid: guid
+		}
+
+		} );
 
 	}
 
