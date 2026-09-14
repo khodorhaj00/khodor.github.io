@@ -46,8 +46,10 @@ unrelated to the app and untouched; everything for the viewer lives in `app/`, `
 * **Releases** (tags `v*`): *Releases* → the same files attached to the release.
 * On the phone: copy or download the APK, open it, allow *Install unknown apps* for the file manager
   or browser when asked. Updating over an installed version works only when both are signed with the
-  same key; a debug-signed build (CI without keystore secrets) cannot update a release-signed one and
-  vice versa — uninstall first.
+  same key and the new build has a higher version code. Stay on one variant: per-ABI APKs carry
+  version code 1000 × ABI index + N and the universal APK plain N, so Android treats a switch
+  (arm64-v8a → universal, or between ABIs) as a downgrade. A debug-signed build (CI without keystore
+  secrets) cannot update a release-signed one and vice versa. Uninstall first in both cases.
 
 ## Open files
 
@@ -120,7 +122,8 @@ Repository *Settings → Secrets and variables → Actions → New repository se
 | `KEY_ALIAS` | `upload` (or the alias you chose) |
 | `KEY_PASSWORD` | the key password — identical to `KEYSTORE_PASSWORD` for the PKCS12 keystores `keytool` creates |
 
-All four must be set; `KEYSTORE_BASE64` alone fails the build with an explicit error.
+All four must be set and printable ASCII (they are written to `android/key.properties`, a Java
+properties file); an empty or non-ASCII value fails the build with an explicit error before Gradle runs.
 `scripts/set-github-secrets.sh` (optional, needs the `gh` CLI logged in) verifies the password and alias
 against the keystore and uploads the four secrets. Back the `.jks` up: it cannot be regenerated, and a
 different key cannot update installed apps.
@@ -132,7 +135,8 @@ different key cannot update installed apps.
 | push to the default branch touching `app/**`, `backend/test/fixtures/**`, `samples/**` or the workflow | `apk`, `viewer` | artifact `rhino-viewer-apk-<sha>`, 30 days; `viewer-screenshots-<sha>` |
 | pull request with the same paths | `apk`, `viewer` | artifacts |
 | *Actions → Build APK → Run workflow* | `apk`, `viewer` | artifacts |
-| tag `v*` | `apk`, `viewer`, `release` | GitHub Release with the APKs and `SHA256SUMS.txt` |
+| tag `v*` | `apk`, `viewer`, then `release` once both are green | GitHub Release with the APKs and `SHA256SUMS.txt` |
+| push to the default branch or pull request touching `backend/**` or `samples/**` (the tests read `samples/Rhino_Logo.3dm`) | Backend CI: `test`, `image` | image `ghcr.io/<owner>/rhino-appserver:<sha>` and `:latest`, pushed from the default branch only |
 
 Release: set `version:` in `app/pubspec.yaml` (e.g. `0.2.0+2` — the `+N` build number must increase
 for Android to accept the update), commit, then
@@ -142,8 +146,9 @@ git tag v0.2.0 && git push origin v0.2.0
 ```
 
 The build fails immediately if the tag does not match the pubspec version. Superseded runs on the same
-branch are cancelled; tag builds never are. The workflows trigger on `main` and `master` (this
-repository's default branch is `master`); the backend image is pushed from whichever is the default.
+branch are cancelled; tag builds never are. Re-running a job replaces the artifacts of the earlier
+attempt. The workflows trigger on `main` and `master` (this repository's default branch is `master`);
+the backend image is pushed from whichever is the default.
 
 ## Optional backend: appserver + Rhino.Compute
 
@@ -228,7 +233,7 @@ Full details (headers, node layout, error table, operational notes): [backend/RE
 |---|---|
 | Banner "N objects have no render mesh", parts missing | File saved with *Save small*, or by a script. Re-save in Rhino as described above, or *Mesh on server*. |
 | Rhino Viewer not offered under *Open with* | The sender reports a MIME type the app does not register. Use *Share to* or *Open .3dm* in the app. |
-| "App not installed" / "conflicts with an existing package" | Signature mismatch between a debug-signed and a release-signed build, or a lower build number. Uninstall, then install. |
+| "App not installed" / "conflicts with an existing package" | Signature mismatch between a debug-signed and a release-signed build, or a lower version code — which is what a switch from a per-ABI APK to the universal one (or between ABIs) looks like to Android. Uninstall, then install. |
 | *Test connection* fails | URL must include the scheme and port (`http://192.168.1.20:8080`); the phone must be on the same network as the server; firewall on port 8080; `APP_API_KEY` set on the server but not in the app. |
 | `/health` shows `compute.reachable: false` | Compute not running, wrong `COMPUTE_URL` (port 5000, trailing slash), firewall on the Windows host, or the appserver container cannot reach the host (`host.docker.internal`, see `backend/docker-compose.yml`). |
 | *Mesh on server* returns `502 compute_unreachable` | Compute is not configured (`COMPUTE_URL` empty) or down. `compute_error` carries Compute's own message, usually a licence or key problem. |
@@ -237,8 +242,8 @@ Full details (headers, node layout, error table, operational notes): [backend/RE
 | Colours differ from Rhino's rendered view | By design: materials are ignored, objects are drawn in object/layer colour. |
 | CI run annotated "Unsigned build" | The four signing secrets are missing; see [Signing](#signing-keystore-for-ci). |
 | Tag build fails at "Version and commit metadata" | Tag `vX.Y.Z` must equal `version:` in `app/pubspec.yaml`. Bump, commit, re-tag. |
-| `viewer` job fails | Download `viewer-screenshots-<sha>` from the run for the rendered fixtures; the log lists the failed check. |
-| Backend image not on GHCR after a push | Images are pushed only from the default branch and only when `backend/**` changed. |
+| `viewer` job fails (on a tag this also holds back the release) | Download `viewer-screenshots-<sha>` from the run for the rendered fixtures; the log lists the failed check. |
+| Backend image not on GHCR after a push | Images are pushed only from the default branch and only when `backend/**` or `samples/**` changed. |
 
 ## Repository layout
 

@@ -14,12 +14,14 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.util.UUID
 import java.util.concurrent.Executors
 
 /**
  * Receives `.3dm` files from ACTION_VIEW / ACTION_SEND intents, copies them to
- * `cacheDir/incoming/` after checking the Rhino magic bytes, and hands the path
- * to Dart over the intent MethodChannel (ARCHITECTURE.md §3.3).
+ * `cacheDir/incoming/<id>/<displayName>` after checking the Rhino magic bytes, and
+ * hands the path to Dart over the intent MethodChannel (ARCHITECTURE.md §3.3).
+ * Dart deletes the per-intent directory once the file is imported.
  */
 class MainActivity : FlutterActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -65,7 +67,13 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun handleIntent(intent: Intent?) {
-        val uri = incomingUri(intent) ?: return
+        val uri = incomingUri(intent)
+        if (uri == null) {
+            // The */* SEND filter lists the app in every share sheet; a text or link
+            // share carries no stream and would otherwise just open Home silently.
+            if (intent?.action == Intent.ACTION_SEND) toast("Share a .3dm file to open it")
+            return
+        }
         copyExecutor.execute {
             val outcome = try {
                 copyIncoming(uri)
@@ -100,12 +108,22 @@ class MainActivity : FlutterActivity() {
         return input.use<InputStream, Outcome> { stream ->
             val header = ByteArray(MAGIC.size)
             if (!readFully(stream, header) || !header.contentEquals(MAGIC)) return@use Outcome.NotRhino
-            val dir = File(cacheDir, "incoming")
-            if (!dir.isDirectory && !dir.mkdirs()) return@use Outcome.Failed("cannot create cache dir")
+            // One directory per intent: a second share of a same-named file must not
+            // overwrite a copy Dart may still be importing.
+            val dir = File(File(cacheDir, INCOMING_DIR), UUID.randomUUID().toString())
+            if (!dir.mkdirs()) return@use Outcome.Failed("cannot create cache dir")
             val target = File(dir, displayName(uri))
-            target.outputStream().use { out ->
-                out.write(header)
-                stream.copyTo(out)
+            val partial = File(dir, PARTIAL_NAME)
+            try {
+                partial.outputStream().use { out ->
+                    out.write(header)
+                    stream.copyTo(out)
+                }
+                if (!partial.renameTo(target)) throw IOException("cannot rename to ${target.name}")
+            } catch (e: Exception) {
+                // Never leave a truncated copy behind for Dart to find.
+                dir.deleteRecursively()
+                throw e
             }
             Outcome.Copied(target.absolutePath)
         }
@@ -130,11 +148,16 @@ class MainActivity : FlutterActivity() {
         return if (raw.isEmpty()) DEFAULT_NAME else raw
     }
 
-    private fun queryDisplayName(uri: Uri): String? =
+    private fun queryDisplayName(uri: Uri): String? = try {
         contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
             val column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
             if (column >= 0 && cursor.moveToFirst()) cursor.getString(column) else null
         }
+    } catch (e: RuntimeException) {
+        // Some providers reject the projection or query() altogether although the
+        // bytes were readable; the URI's last segment (or DEFAULT_NAME) is used then.
+        null
+    }
 
     private fun onCopied(outcome: Outcome) {
         when (outcome) {
@@ -165,7 +188,9 @@ class MainActivity : FlutterActivity() {
 
     private companion object {
         const val CHANNEL = "com.styro3d.rhino_viewer/intent"
+        const val INCOMING_DIR = "incoming"
         const val DEFAULT_NAME = "received.3dm"
+        const val PARTIAL_NAME = ".partial"
         val MAGIC: ByteArray = "3D Geometry File Format".toByteArray(Charsets.US_ASCII)
     }
 }

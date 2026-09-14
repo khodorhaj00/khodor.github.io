@@ -1021,6 +1021,23 @@ class Rhino3dmLoader extends Loader {
 				worker._taskCosts = {};
 				worker._taskLoad = 0;
 
+				// PATCH(init-error): settles once the worker has instantiated rhino3dm, or
+				// rejects when it cannot (WASM compile/memory failure, broken script). See PATCHES.md.
+				worker._ready = new Promise( ( resolve, reject ) => {
+
+					worker._readyResolve = resolve;
+					worker._readyReject = reject;
+
+				} );
+
+				worker.onerror = ( event ) => {
+
+					const message = { type: 'error', id: 0, error: { message: 'rhino3dm worker error: ' + ( event.message || 'unknown' ) } };
+					worker._readyReject( message );
+					for ( const id in worker._callbacks ) worker._callbacks[ id ].reject( message );
+
+				};
+
 				worker.postMessage( {
 					type: 'init',
 					libraryConfig: this.libraryConfig
@@ -1037,12 +1054,19 @@ class Rhino3dmLoader extends Loader {
 							console.warn( message.data );
 							break;
 
+						case 'ready':
+							// PATCH(init-error): rhino3dm is usable inside the worker.
+							worker._readyResolve();
+							break;
+
 						case 'decode':
 							worker._callbacks[ message.id ].resolve( message );
 							break;
 
 						case 'error':
-							worker._callbacks[ message.id ].reject( message );
+							// PATCH(init-error): id 0 is the library initialisation itself, not a task.
+							if ( message.id === 0 ) worker._readyReject( message );
+							else worker._callbacks[ message.id ].reject( message );
 							break;
 
 						default:
@@ -1108,6 +1132,7 @@ function Rhino3dmWorker() {
 	let libraryConfig;
 	let rhino;
 	let taskID;
+	let initError; // PATCH(init-error)
 
 	onmessage = function ( e ) {
 
@@ -1120,16 +1145,25 @@ function Rhino3dmWorker() {
 				libraryConfig = message.libraryConfig;
 				const wasmBinary = libraryConfig.wasmBinary;
 				let RhinoModule;
-				libraryPending = new Promise( function ( resolve ) {
+				libraryPending = new Promise( function ( resolve, reject ) {
 
 					/* Like Basis Loader */
 					RhinoModule = { wasmBinary, onRuntimeInitialized: resolve };
 
-					rhino3dm( RhinoModule ); // eslint-disable-line no-undef
+					// PATCH(init-error): the factory's promise rejects when the WASM cannot be
+					// instantiated; upstream drops it and every decode then waits forever.
+					rhino3dm( RhinoModule ).catch( reject ); // eslint-disable-line no-undef
 
 				 } ).then( () => {
 
 					rhino = RhinoModule;
+					self.postMessage( { type: 'ready' } ); // PATCH(init-error)
+
+				 }, ( error ) => {
+
+					// PATCH(init-error): report once with id 0 (not a task); decodes fail fast below.
+					initError = new Error( 'rhino3dm failed to initialise: ' + ( error && error.message ? error.message : error ) );
+					self.postMessage( { type: 'error', id: 0, error: { message: initError.message, stack: error && error.stack } } );
 
 				 } );
 
@@ -1143,6 +1177,8 @@ function Rhino3dmWorker() {
 				libraryPending.then( () => {
 
 					try {
+
+						if ( initError ) throw initError; // PATCH(init-error)
 
 						const data = decodeObjects( rhino, buffer, subdivisionLevel );
 						// Transfer the mesh typed arrays (fast path) instead of structure-cloning
@@ -1220,6 +1256,10 @@ function Rhino3dmWorker() {
 
 		const arr = new Uint8Array( buffer );
 		const doc = rhino.File3dm.fromByteArray( arr );
+
+		// PATCH(invalid-file): rhino3dm returns null (no exception) when the bytes are not a
+		// complete .3dm; without this the failure surfaces as a TypeError on `doc.objects()`.
+		if ( ! doc ) throw new Error( 'Not a valid or complete .3dm file' );
 
 		const objects = [];
 		const materials = [];

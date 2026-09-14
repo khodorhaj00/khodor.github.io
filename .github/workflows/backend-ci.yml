@@ -5,10 +5,12 @@ on:
     branches: [main, master]
     paths:
       - 'backend/**'
+      - 'samples/**'   # the test suite reads samples/Rhino_Logo.3dm
       - '.github/workflows/backend-ci.yml'
   pull_request:
     paths:
       - 'backend/**'
+      - 'samples/**'
       - '.github/workflows/backend-ci.yml'
   workflow_dispatch:
 

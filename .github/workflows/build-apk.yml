@@ -104,10 +104,19 @@ jobs:
               echo "::error::secret $name is empty but KEYSTORE_BASE64 is set - all four signing secrets are required"
               exit 1
             fi
+            # key.properties is read by java.util.Properties as ISO-8859-1: a newline, control
+            # or non-ASCII character reaches Gradle altered while keytool (below) still accepts it.
+            if [ "$(printf '%s' "${!name}" | LC_ALL=C tr -d '\040-\176' | wc -c)" -ne 0 ]; then
+              echo "::error::secret $name contains a newline, control or non-ASCII character - signing secrets must be printable ASCII"
+              exit 1
+            fi
           done
           printf '%s' "$KEYSTORE_BASE64" | base64 -d > android/app/upload-keystore.jks
+          # Properties treats '\' as an escape and drops whitespace in front of a value.
+          properties_value() { local v=${1//\\/\\\\}; case $v in ' '*) v="\\$v" ;; esac; printf '%s' "$v"; }
           printf 'storeFile=upload-keystore.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
-            "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > android/key.properties
+            "$(properties_value "$KEYSTORE_PASSWORD")" "$(properties_value "$KEY_ALIAS")" \
+            "$(properties_value "$KEY_PASSWORD")" > android/key.properties
           # Fails here, with a readable message, rather than deep inside Gradle.
           keytool -list -keystore android/app/upload-keystore.jks -storepass:env KEYSTORE_PASSWORD -alias "$KEY_ALIAS" > /dev/null
           echo "release keystore installed, alias '$KEY_ALIAS'"
@@ -146,11 +155,15 @@ jobs:
             app/dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
+          # A re-run inside the same workflow run replaces the earlier attempt's artifact
+          # instead of failing on the name conflict.
+          overwrite: true
 
   release:
     name: GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: apk
+    # The APK ships the viewer page the harness checks, so a red harness blocks the release.
+    needs: [apk, viewer]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -176,7 +189,7 @@ jobs:
             Signing: ${{ needs.apk.outputs.signed == 'true' && 'release upload key' || 'DEBUG key (no KEYSTORE_BASE64 secret configured)' }}.
 
             Install `rhino-viewer-*-arm64-v8a.apk` on current phones; `universal` runs on any ABI.
-            Switching between a debug-signed and a release-signed build requires uninstalling first.
+            Stay on one variant across updates: per-ABI APKs carry version code 1000 × ABI index + N, the universal APK plain N, so Android treats a switch (e.g. arm64-v8a → universal) as a downgrade. Uninstall first for that, and when switching between debug-signed and release-signed builds.
 
   viewer:
     name: Viewer page (Playwright)
@@ -216,3 +229,4 @@ jobs:
           path: app/tool/viewer_test/out/*.png
           if-no-files-found: warn
           retention-days: 14
+          overwrite: true

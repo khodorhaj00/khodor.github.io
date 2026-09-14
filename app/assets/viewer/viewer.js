@@ -8,6 +8,10 @@ const HIGHLIGHT_COLOR = 0xFFB020;
 const HIGHLIGHT_INTENSITY = 0.35;
 const GHOSTED_OPACITY = 0.35;
 const EDGE_ANGLE_DEG = 30;
+const EDGE_BUILD_BUDGET_MS = 30;
+const EDGE_MAX_TRIANGLES = 100000;
+const DARK_LUMINANCE = 0.12;
+const DARK_LIFT_COLOR = 0x9AA1AA;
 const GRID_DIVISIONS = 20;
 const GRID_SCALE = 10;
 const MAX_WARNINGS = 50;
@@ -50,29 +54,67 @@ function log(level, message) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Loader: stock loader plus attributes on block-instance wrappers
+// Loader: stock loader minus file materials, plus full (nested) block-instance expansion
 // ---------------------------------------------------------------------------------------
 
+// buildScene() replaces every material with shared per-colour ones, so the stock loader's
+// materials — and the decode of any embedded texture or render environment they carry,
+// which the stock loader repeats for every object on the main thread — would be wasted.
+const placeholderMaterial = new THREE.MeshStandardMaterial({ name: 'placeholder' });
+
 class ViewerLoader extends Rhino3dmLoader {
+  _createMaterial() {
+    return placeholderMaterial;
+  }
+
+  // The stock loader expands block instances one level only: a reference that is itself a
+  // definition member is dropped from its definition and drawn once, at the top level, with
+  // just its local transform. Build definitions recursively instead, and keep each
+  // reference's own attributes (layer, name, id, user strings) on its wrapper.
   _createGeometry(data) {
-    const root = super._createGeometry(data);
-    // The stock loader wraps every InstanceReference in a bare Object3D and drops its
-    // attributes (layer, name, id). It appends those wrappers in a fixed order — for each
-    // definition, every reference pointing at it — so the same walk over the worker data
-    // recovers which attributes belong to which wrapper.
-    const wrappers = root.children.filter((child) => child.userData.objectType === undefined);
-    const definitions = data.objects.filter((o) => o.objectType === 'InstanceDefinition');
-    const references = data.objects.filter((o) => o.objectType === 'InstanceReference');
-    const ordered = [];
-    for (const def of definitions) {
-      for (const ref of references) {
-        if (ref.geometry.parentIdefId === def.attributes.id) ordered.push(ref);
-      }
+    const definitions = new Map();
+    const members = new Map();
+    const plain = [];
+    for (const obj of data.objects) {
+      if (obj.objectType === 'InstanceDefinition') definitions.set(obj.attributes.id, obj);
+      else if (obj.attributes.isInstanceDefinitionObject) members.set(obj.attributes.id, obj);
+      else if (obj.objectType !== 'InstanceReference') plain.push(obj);
     }
-    wrappers.forEach((wrapper, i) => {
+    const root = super._createGeometry({ ...data, objects: plain });
+
+    const templates = new Map();
+    const building = new Set();
+    const buildDefinition = (id) => {
+      if (templates.has(id)) return templates.get(id);
+      const template = new THREE.Object3D();
+      const definition = definitions.get(id);
+      // An unknown definition, or one that (indirectly) contains itself, stays empty.
+      if (!definition || building.has(id)) return template;
+      building.add(id);
+      for (const memberId of definition.attributes.objectIds || []) {
+        const member = members.get(memberId);
+        if (!member) continue;
+        const child = member.objectType === 'InstanceReference' ? instantiate(member) : this._createObject(member, null);
+        if (child && !child.isLight) template.add(child);
+      }
+      building.delete(id);
+      templates.set(id, template);
+      return template;
+    };
+    const instantiate = (ref) => {
+      const wrapper = new THREE.Object3D();
+      wrapper.applyMatrix4(new THREE.Matrix4().set(...ref.geometry.xform.array));
+      wrapper.name = ref.attributes.name || '';
       wrapper.userData.objectType = 'InstanceReference';
-      if (ordered.length === wrappers.length) wrapper.userData.attributes = ordered[i].attributes;
-    });
+      wrapper.userData.attributes = ref.attributes;
+      const definition = definitions.get(ref.geometry.parentIdefId);
+      wrapper.userData.blockName = definition ? definition.attributes.name || '' : '';
+      for (const child of buildDefinition(ref.geometry.parentIdefId).children) wrapper.add(child.clone(true));
+      return wrapper;
+    };
+    for (const obj of data.objects) {
+      if (obj.objectType === 'InstanceReference' && !obj.attributes.isInstanceDefinitionObject) root.add(instantiate(obj));
+    }
     return root;
   }
 }
@@ -218,7 +260,9 @@ const lineMaterials = new Map();
 const pointMaterials = new Map();
 const edgeMaterial = new THREE.LineBasicMaterial({ color: 0x8B93A1 });
 const edgeGeometries = new Map();
+const darkLiftHsl = new THREE.Color(DARK_LIFT_COLOR).getHSL({}, THREE.SRGBColorSpace);
 let displayMode = 'shaded';
+let edgeJob = null;
 
 function colorToHex(color) {
   return ((color.r & 255) << 16) | ((color.g & 255) << 8) | (color.b & 255);
@@ -228,6 +272,7 @@ function hexString(hex) {
   return '#' + hex.toString(16).padStart(6, '0').toUpperCase();
 }
 
+// The colour the file assigns to an object; reported in stats and used for the GLB export.
 function objectColorHex(attributes, layers) {
   const source = attributes.colorSource && attributes.colorSource.name;
   if (source === 'ObjectColorSource_ColorFromObject' && attributes.objectColor) {
@@ -236,6 +281,25 @@ function objectColorHex(attributes, layers) {
   const layer = layers[attributes.layerIndex];
   if (layer && layer.color) return colorToHex(layer.color);
   return attributes.drawColor ? colorToHex(attributes.drawColor) : 0xffffff;
+}
+
+// The colour actually drawn. Rhino's default layer colour is black, and a black albedo gets
+// no diffuse light, so such objects would be silhouettes against the dark background. Lift
+// near-black colours towards a light grey, the more the darker they are; a colour that
+// carries a hue keeps it (dark red reads as muted red, not grey).
+function displayColorHex(hex) {
+  const color = new THREE.Color(hex);
+  const luminance = 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b;
+  if (luminance >= DARK_LUMINANCE) return hex;
+  const t = 1 - luminance / DARK_LUMINANCE;
+  const hsl = color.getHSL({}, THREE.SRGBColorSpace);
+  const hued = hsl.s > 0.25;
+  return color.setHSL(
+    hued ? hsl.h : darkLiftHsl.h,
+    THREE.MathUtils.lerp(hsl.s, hued ? hsl.s * 0.5 : darkLiftHsl.s, t),
+    THREE.MathUtils.lerp(hsl.l, darkLiftHsl.l, t),
+    THREE.SRGBColorSpace,
+  ).getHex();
 }
 
 function meshMaterialFor(hex) {
@@ -301,16 +365,58 @@ function edgesFor(mesh) {
   return edges;
 }
 
+function meshTriangles(mesh) {
+  const position = mesh.geometry.getAttribute('position');
+  if (!position) return 0;
+  return Math.floor((mesh.geometry.index ? mesh.geometry.index.count : position.count) / 3);
+}
+
+// EdgesGeometry is O(triangles) on the main thread, so edges are built in time-boxed
+// slices: the first one now, the rest between frames, visible meshes first. A mesh above
+// EDGE_MAX_TRIANGLES keeps its shading only. Cancelled by setting edgeJob to null.
+function buildEdges() {
+  const pending = [];
+  forEachMesh((mesh) => {
+    if (mesh.userData.edgesSkipped || mesh.children.some((child) => child.userData.viewerEdges)) return;
+    pending.push(mesh);
+  });
+  pending.sort((a, b) => Number(b.visible) - Number(a.visible));
+  const job = { pending, next: 0, skipped: 0 };
+  edgeJob = job;
+  const step = () => {
+    if (edgeJob !== job) return;
+    const deadline = performance.now() + EDGE_BUILD_BUDGET_MS;
+    while (job.next < job.pending.length && performance.now() < deadline) {
+      const mesh = job.pending[job.next++];
+      if (meshTriangles(mesh) > EDGE_MAX_TRIANGLES) {
+        mesh.userData.edgesSkipped = true;
+        job.skipped += 1;
+      } else {
+        edgesFor(mesh).visible = true;
+      }
+    }
+    requestRender();
+    if (job.next < job.pending.length) {
+      requestAnimationFrame(step);
+      return;
+    }
+    edgeJob = null;
+    if (job.skipped) log('warn', `Edges skipped for ${job.skipped} mesh(es) above ${EDGE_MAX_TRIANGLES} triangles`);
+  };
+  step();
+}
+
 function applyDisplayMode() {
   for (const material of meshMaterials.values()) applyModeToMaterial(material, displayMode);
   if (picked) applyModeToMaterial(picked.mesh.material, displayMode);
-  const showEdges = displayMode === 'shaded_edges';
+  if (displayMode === 'shaded_edges') {
+    buildEdges();
+    return;
+  }
+  edgeJob = null;
   forEachMesh((mesh) => {
-    if (showEdges) edgesFor(mesh).visible = true;
-    else {
-      const edges = mesh.children.find((child) => child.userData.viewerEdges);
-      if (edges) edges.visible = false;
-    }
+    const edges = mesh.children.find((child) => child.userData.viewerEdges);
+    if (edges) edges.visible = false;
   });
 }
 
@@ -333,10 +439,12 @@ function applyVisibility() {
     const attributes = obj.userData.attributes;
     if (!attributes) return;
     const layerOk = layerVisible[attributes.layerIndex] !== false;
+    // Objects hidden in Rhino (Hide command) stay hidden, as in the backend's /convert.
+    const objectOk = attributes.visible !== false;
     let typeOk = true;
     if (obj.isLine) typeOk = curvesVisible;
     else if (obj.isPoints) typeOk = pointsVisible;
-    obj.visible = layerOk && typeOk;
+    obj.visible = layerOk && objectOk && typeOk;
   });
   requestRender();
 }
@@ -513,20 +621,36 @@ function setPicked(mesh) {
   emit('objectPicked', mesh ? describeObject(mesh) : null);
 }
 
+// The top-level block instance containing a mesh, if any.
+function instanceOf(mesh) {
+  let instance = null;
+  for (let obj = mesh.parent; obj && obj !== modelRoot; obj = obj.parent) {
+    if (obj.userData.objectType === 'InstanceReference' && obj.userData.attributes) instance = obj;
+  }
+  return instance;
+}
+
+// Block content is reported as its top-level instance, as Rhino selects it: the reference
+// carries the meaningful name, layer and user strings; the member's user strings fill gaps.
 function describeObject(mesh) {
-  const attributes = mesh.userData.attributes || {};
+  const instance = instanceOf(mesh);
+  const subject = instance || mesh;
+  const attributes = subject.userData.attributes || {};
   const layers = currentLayers();
   const layer = layers[attributes.layerIndex];
-  const box = new THREE.Box3().setFromObject(mesh, true);
+  const box = new THREE.Box3().setFromObject(subject, true);
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
+  const userStrings = Object.fromEntries((mesh.userData.attributes || {}).userStrings || []);
+  Object.assign(userStrings, Object.fromEntries(attributes.userStrings || []));
   return {
     id: attributes.id ?? null,
     name: attributes.name || '',
-    objectType: mesh.userData.objectType,
+    objectType: instance ? 'InstanceReference' : mesh.userData.objectType,
+    blockName: instance ? instance.userData.blockName || '' : '',
     layerIndex: attributes.layerIndex ?? -1,
     layerName: layer ? layer.name : '',
-    userStrings: Object.fromEntries(attributes.userStrings || []),
+    userStrings,
     size: [size.x, size.y, size.z],
     center: [center.x, center.y, center.z],
   };
@@ -610,6 +734,7 @@ async function load(options) {
   modelName = displayName;
 
   try {
+    await workerReady;
     let buffer;
     if (url) buffer = await fetchBytes(url);
     else if (base64) buffer = decodeBase64(base64);
@@ -669,7 +794,7 @@ function buildScene(root) {
     const attributes = obj.userData.attributes;
     if (!attributes || !(obj.isMesh || obj.isLine || obj.isPoints)) return;
     loaderMaterials.add(obj.material);
-    const hex = objectColorHex(attributes, layers);
+    const hex = displayColorHex(objectColorHex(attributes, layers));
     if (obj.isMesh) obj.material = meshMaterialFor(hex);
     else if (obj.isLine) obj.material = lineMaterialFor(hex);
     else obj.material = pointMaterialFor(hex, obj.geometry.hasAttribute('color'));
@@ -785,6 +910,7 @@ function clear() {
     disposeObject(modelRoot);
     modelRoot = null;
   }
+  edgeJob = null;
   for (const geometry of edgeGeometries.values()) geometry.dispose();
   edgeGeometries.clear();
   for (const cache of [meshMaterials, lineMaterials, pointMaterials]) {
@@ -820,14 +946,20 @@ async function exportGlb() {
     emit('exportResult', { ok: false, error: 'No model loaded' });
     return;
   }
-  // Export clean per-colour materials (no highlight, no display-mode flags) on a Y-up copy.
+  // Export clean per-colour materials in the file's colours (no legibility lift, no
+  // highlight, no display-mode flags) on a Y-up copy.
+  const layers = modelRoot.userData.layers || [];
   const exportMaterials = new Map();
-  const materialFor = (material) => {
-    const hex = material.color.getHex();
-    let clean = exportMaterials.get(hex);
+  const materialFor = (obj) => {
+    const hex = objectColorHex(obj.userData.attributes || {}, layers);
+    const vertexColors = Boolean(obj.isPoints && obj.material.vertexColors);
+    const key = `${obj.type}:${hex}:${vertexColors}`;
+    let clean = exportMaterials.get(key);
     if (!clean) {
-      clean = new THREE.MeshStandardMaterial({ color: hex, roughness: 0.65, metalness: 0, side: THREE.DoubleSide });
-      exportMaterials.set(hex, clean);
+      if (obj.isMesh) clean = new THREE.MeshStandardMaterial({ color: hex, roughness: 0.65, metalness: 0, side: THREE.DoubleSide });
+      else if (obj.isPoints) clean = new THREE.PointsMaterial({ color: vertexColors ? 0xffffff : hex, vertexColors, size: 6, sizeAttenuation: false });
+      else clean = new THREE.LineBasicMaterial({ color: hex });
+      exportMaterials.set(key, clean);
     }
     return clean;
   };
@@ -835,9 +967,6 @@ async function exportGlb() {
   yUpRoot.name = modelName.replace(/\.3dm$/i, '');
   yUpRoot.rotation.x = -Math.PI / 2;
   const copy = modelRoot.clone(true);
-  copy.traverse((obj) => {
-    if (obj.isMesh) obj.material = materialFor(obj.material);
-  });
   for (const obj of [...copy.children]) {
     if (obj.isSprite) copy.remove(obj);
   }
@@ -845,6 +974,9 @@ async function exportGlb() {
     for (const child of [...obj.children]) {
       if (child.userData.viewerEdges) obj.remove(child);
     }
+  });
+  copy.traverse((obj) => {
+    if (obj.isMesh || obj.isLine || obj.isPoints) obj.material = materialFor(obj);
   });
   yUpRoot.add(copy);
 
@@ -915,13 +1047,17 @@ window.viewer = Object.freeze({
 });
 
 // ---------------------------------------------------------------------------------------
-// Start-up: frame an empty unit scene, then fetch rhino3dm and spawn the decode worker so
-// the first load only pays for parsing
+// Start-up: frame an empty unit scene, then fetch rhino3dm and spawn the decode worker.
+// The worker's `_ready` (patched loader, see PATCHES.md) settles once rhino3dm is
+// instantiated inside it, so viewerReady means the first load only pays for parsing, and
+// an initialisation failure fails every load() instead of hanging it.
 // ---------------------------------------------------------------------------------------
 
 createControls();
 frameSphere(new THREE.Vector3(), modelRadius);
-loader._initLibrary()
+const workerReady = loader._initLibrary()
   .then(() => loader._getWorker(0))
+  .then((worker) => worker._ready);
+workerReady
   .then(() => emit('viewerReady', { three: 'r' + THREE.REVISION, rhino3dm: RHINO3DM_VERSION }))
   .catch((error) => log('error', `rhino3dm initialisation failed: ${errorMessage(error)}`));

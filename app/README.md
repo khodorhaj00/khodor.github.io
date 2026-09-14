@@ -38,9 +38,10 @@ from repository secrets (see the root README).
 
 * **Open .3dm** on the home screen uses the system picker (any file type; the app checks the
   `3D Geometry File Format` magic bytes itself because Android reports no MIME type for `.3dm`).
-* *Open with* / *Share to* from Files, Drive, WhatsApp, mail: `MainActivity.kt` copies the
-  stream to `cacheDir/incoming/`, validates the magic, and hands the path to Dart over
-  `MethodChannel('com.styro3d.rhino_viewer/intent')`.
+* *Open with* / *Share to* from Files, Drive, WhatsApp, mail: `MainActivity.kt` validates the
+  magic, copies the stream to its own `cacheDir/incoming/<id>/` directory, and hands the path
+  to Dart over `MethodChannel('com.styro3d.rhino_viewer/intent')`; Dart deletes that
+  directory after importing.
 * Imported files are stored as `<sha256>.3dm` under the app-support `models/` directory and
   listed under *Recent* (max 40 entries, size cap configurable in Settings). Server-meshed
   results are cached as `<sha256>.meshed.3dm` and preferred on the next open.

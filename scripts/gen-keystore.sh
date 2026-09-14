@@ -9,7 +9,7 @@
 # is signed with the same key as CI.
 #
 # Environment (all optional):
-#   KEYSTORE_PASSWORD  store password, at least 6 characters; prompted when unset
+#   KEYSTORE_PASSWORD  store password, at least 6 printable ASCII characters; prompted when unset
 #   KEY_ALIAS          key alias, default "upload"
 #   DNAME              certificate subject, default "CN=Rhino Viewer, O=Styro3D"
 #   VALIDITY_DAYS      certificate validity, default 10000 (Google Play requires 25+ years)
@@ -19,6 +19,12 @@
 set -euo pipefail
 
 die() { echo "gen-keystore: $*" >&2; exit 1; }
+
+# key.properties is read by java.util.Properties as ISO-8859-1 with '\' as the escape
+# character, so only printable ASCII reaches Gradle unchanged (keytool alone accepts more).
+printable_ascii() { [ "$(printf '%s' "$1" | LC_ALL=C tr -d '\040-\176' | wc -c)" -eq 0 ]; }
+# Properties treats '\' as an escape and drops whitespace in front of a value.
+properties_value() { local v=${1//\\/\\\\}; case $v in ' '*) v="\\$v" ;; esac; printf '%s' "$v"; }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 keystore="${1:-$repo_root/app/android/app/upload-keystore.jks}"
@@ -35,6 +41,8 @@ if [ -z "${KEYSTORE_PASSWORD:-}" ]; then
   [ "$KEYSTORE_PASSWORD" = "$repeat" ] || die "passwords do not match"
 fi
 [ "${#KEYSTORE_PASSWORD}" -ge 6 ] || die "password must be at least 6 characters (keytool minimum)"
+printable_ascii "$KEYSTORE_PASSWORD" || die "password must be printable ASCII (no newline, control or non-ASCII characters)"
+printable_ascii "$alias" || die "KEY_ALIAS must be printable ASCII"
 export KEYSTORE_PASSWORD
 
 mkdir -p "$(dirname "$keystore")"
@@ -50,7 +58,8 @@ keytool -list -keystore "$keystore" -storepass:env KEYSTORE_PASSWORD -alias "$al
 android_dir="$repo_root/app/android"
 if [ "$(cd "$(dirname "$keystore")" && pwd)" = "$android_dir/app" ]; then
   printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
-    "$(basename "$keystore")" "$KEYSTORE_PASSWORD" "$alias" "$KEYSTORE_PASSWORD" > "$android_dir/key.properties"
+    "$(properties_value "$(basename "$keystore")")" "$(properties_value "$KEYSTORE_PASSWORD")" \
+    "$(properties_value "$alias")" "$(properties_value "$KEYSTORE_PASSWORD")" > "$android_dir/key.properties"
   chmod 600 "$android_dir/key.properties"
   echo "Wrote $android_dir/key.properties (git-ignored): local release builds are now signed."
 fi

@@ -30,6 +30,13 @@ fi
 export KEYSTORE_PASSWORD
 KEY_PASSWORD="${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
 
+# CI writes these into key.properties, which java.util.Properties reads as ISO-8859-1; the
+# build-apk workflow rejects anything but printable ASCII, so fail here before uploading.
+printable_ascii() { [ "$(printf '%s' "$1" | LC_ALL=C tr -d '\040-\176' | wc -c)" -eq 0 ]; }
+printable_ascii "$KEYSTORE_PASSWORD" || die "KEYSTORE_PASSWORD must be printable ASCII (no newline, control or non-ASCII characters)"
+printable_ascii "$alias" || die "KEY_ALIAS must be printable ASCII"
+printable_ascii "$KEY_PASSWORD" || die "KEY_PASSWORD must be printable ASCII"
+
 # Verify password and alias locally so a typo never ends up as a broken CI secret.
 keytool -list -keystore "$keystore" -storepass:env KEYSTORE_PASSWORD -alias "$alias" > /dev/null \
   || die "alias '$alias' or the password is wrong for $keystore"

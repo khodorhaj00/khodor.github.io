@@ -28,7 +28,12 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
             <!-- file:// URIs ending in .3dm (file managers, browsers). Android matches
-                 pathPattern greedily, so dotted names need the extra variants. -->
+                 pathPattern greedily, so dotted names need the extra variants.
+                 Limitation: only apps targeting API < 24 can still send file:// URIs,
+                 and reading one from shared storage needs READ_EXTERNAL_STORAGE, which
+                 this app neither declares nor requests; such an open ends in the
+                 "Could not read the file" toast. A type-less variant of this filter
+                 would only add more chooser entries that fail the same way. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
