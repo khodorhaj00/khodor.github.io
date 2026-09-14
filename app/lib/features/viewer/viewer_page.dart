@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:share_plus/share_plus.dart';
 
@@ -45,10 +46,18 @@ class _ViewerPageState extends State<ViewerPage> {
       '$_origin/assets/flutter_assets/assets/viewer/index.html';
   static const Duration _readyTimeout = Duration(seconds: 20);
 
+  /// Inline loading keeps several transient copies of the file in memory
+  /// (Dart bytes, base64, the JS source string, the decoded buffer), so it
+  /// is only attempted for files small enough to survive that.
+  static const int _base64FallbackMaxBytes = 25 << 20;
+
   ViewerBridge? _bridge;
-  InAppWebViewController? _controller;
   final List<StreamSubscription<Object?>> _subscriptions = [];
   Timer? _readyTimer;
+
+  /// Bumped by [_retry]: a new key makes Flutter create a fresh platform
+  /// WebView, which is the only way back from a dead render process.
+  int _webViewGeneration = 0;
 
   late RecentFile _entry = widget.entry;
   ViewerReadyInfo? _ready;
@@ -63,20 +72,35 @@ class _ViewerPageState extends State<ViewerPage> {
   bool _grid = true;
   bool _triedBase64 = false;
 
+  /// File name (inside modelsDir) of the load in flight or last completed.
+  String? _loadingFileName;
+
+  /// Set once the `.meshed.3dm` copy failed to load: it is discarded and the
+  /// original is used for the rest of this page's life.
+  bool _meshedRejected = false;
+
   AppServices get _services => widget.services;
+
+  bool get _showingMeshed =>
+      _loadingFileName == FileService.meshedName(_entry.sha);
 
   @override
   void dispose() {
     _readyTimer?.cancel();
-    for (final s in _subscriptions) {
-      s.cancel();
-    }
-    _bridge?.dispose();
+    _tearDownWebView();
     super.dispose();
   }
 
+  void _tearDownWebView() {
+    for (final s in _subscriptions) {
+      s.cancel();
+    }
+    _subscriptions.clear();
+    _bridge?.dispose();
+    _bridge = null;
+  }
+
   void _onWebViewCreated(InAppWebViewController controller) {
-    _controller = controller;
     final bridge = ViewerBridge(InAppWebViewJsRunner(controller))
       ..registerHandlers();
     _bridge = bridge;
@@ -92,6 +116,10 @@ class _ViewerPageState extends State<ViewerPage> {
 
   void _onLoadStop() {
     if (_ready != null) return;
+    _armReadyTimer();
+  }
+
+  void _armReadyTimer() {
     _readyTimer?.cancel();
     _readyTimer = Timer(_readyTimeout, () {
       if (mounted && _ready == null) {
@@ -119,31 +147,111 @@ class _ViewerPageState extends State<ViewerPage> {
       _picked = null;
     });
     final files = _services.files;
-    final fileName = await files.preferredFileName(_entry.sha);
-    if (viaBase64) {
-      final bytes = await File('${files.modelsDir.path}/$fileName')
-          .readAsBytes();
-      await bridge.load(base64: base64Encode(bytes), name: _entry.name);
-    } else {
-      await bridge.load(url: '$_origin/files/$fileName', name: _entry.name);
+    final sha = _entry.sha;
+    try {
+      final fileName = _meshedRejected
+          ? FileService.originalName(sha)
+          : await files.preferredFileName(sha);
+      _loadingFileName = fileName;
+      final String? base64;
+      if (viaBase64) {
+        final bytes = await File('${files.modelsDir.path}/$fileName')
+            .readAsBytes();
+        base64 = base64Encode(bytes);
+      } else {
+        base64 = null;
+      }
+      // The page may have been retried or left while reading.
+      if (!mounted || !identical(bridge, _bridge)) return;
+      await bridge.load(
+        url: base64 == null ? '$_origin/files/$fileName' : null,
+        base64: base64,
+        name: _entry.name,
+      );
+    } on IOException catch (e) {
+      _fail('The cached file could not be read: $e');
     }
   }
 
-  void _onLoadResult(LoadResult result) {
-    // The asset-loader URL can fail on some WebView builds; the contract's
-    // fallback is to hand the bytes over inline, tried once per file.
-    if (!result.ok && !_triedBase64) {
-      _triedBase64 = true;
-      _startLoad(viaBase64: true);
-      return;
-    }
+  void _fail(String message) {
+    if (!mounted) return;
     setState(() {
       _progress = null;
-      _stats = result.stats;
-      _layers = result.stats?.layers ?? const [];
-      _error = result.ok ? null : result.error;
+      _stats = null;
+      _layers = const [];
+      _error = message;
     });
-    if (result.ok) _applyDisplayState();
+  }
+
+  void _onLoadResult(LoadResult result) {
+    if (result.ok) {
+      setState(() {
+        _progress = null;
+        _stats = result.stats;
+        _layers = result.stats?.layers ?? const [];
+        _error = null;
+      });
+      _applyDisplayState();
+      return;
+    }
+    final error = result.error ?? 'Unknown error';
+    // The asset-loader URL can fail on some WebView builds; the contract's
+    // fallback is to hand the bytes over inline, tried once per file. A
+    // parse or build failure would only fail again, so it is not retried.
+    if (result.isFetchFailure && !_triedBase64) {
+      _triedBase64 = true;
+      unawaited(_retryInline(error));
+      return;
+    }
+    if (_showingMeshed && !_meshedRejected) {
+      _meshedRejected = true;
+      unawaited(_discardMeshed(error));
+      return;
+    }
+    _fail(error);
+  }
+
+  Future<void> _retryInline(String fetchError) async {
+    final fileName = _loadingFileName;
+    if (fileName == null) {
+      _fail(fetchError);
+      return;
+    }
+    try {
+      final length = await File('${_services.files.modelsDir.path}/$fileName')
+          .length();
+      if (length > _base64FallbackMaxBytes) {
+        _fail(
+          '$fetchError. The file (${formatBytes(length)}) is too large to '
+          'load inline instead.',
+        );
+        return;
+      }
+    } on IOException catch (e) {
+      _fail('The cached file could not be read: $e');
+      return;
+    }
+    if (mounted) await _startLoad(viaBase64: true);
+  }
+
+  // A .meshed.3dm that no longer loads (truncated by a kill mid-write, or a
+  // bad server result) must not shadow the original forever.
+  Future<void> _discardMeshed(String reason) async {
+    try {
+      await _services.files.discardMeshed(_entry.sha);
+      await _services.cache.markMeshed(_entry.sha, meshed: false);
+    } on IOException {
+      // _meshedRejected keeps this page on the original regardless.
+    } on PlatformException {
+      // Same: a stale recents flag only costs one extra fallback later.
+    }
+    if (!mounted) return;
+    _entry = _entry.copyWith(meshed: false);
+    _triedBase64 = false;
+    _snack(
+      'The server-meshed copy is unreadable ($reason); showing the original',
+    );
+    await _startLoad();
   }
 
   // After a (re)load the page is back to its defaults; re-apply the user's
@@ -161,7 +269,9 @@ class _ViewerPageState extends State<ViewerPage> {
   }
 
   void _onLog(ViewerLog log) {
-    if (log.level == ViewerLogLevel.error) {
+    // A failing load ends in the error panel or in a silent retry, so its
+    // `Load failed` log would only duplicate (or contradict) that.
+    if (log.level == ViewerLogLevel.error && _progress == null) {
       _snack(log.message);
     } else if (kDebugMode) {
       debugPrint('[viewer:${log.level.name}] ${log.message}');
@@ -184,10 +294,11 @@ class _ViewerPageState extends State<ViewerPage> {
         apiKey: settings.apiKey,
       );
       if (result.meshedCount == 0) {
+        final skipped = result.skippedCount;
         _snack(
-          result.skippedCount > 0
-              ? 'Server skipped ${result.skippedCount} objects (Rhino.Compute not reachable)'
-              : 'Server found nothing to mesh',
+          skipped > 0
+              ? 'The server could not mesh $skipped object${skipped == 1 ? '' : 's'}'
+              : 'The server found nothing to mesh',
         );
         return;
       }
@@ -241,17 +352,23 @@ class _ViewerPageState extends State<ViewerPage> {
     }
   }
 
-  Future<void> _shareOriginal() => SharePlus.instance.share(
-    ShareParams(
-      files: [
-        XFile(
-          _services.files.originalFile(_entry.sha).path,
-          mimeType: 'application/octet-stream',
+  Future<void> _shareOriginal() async {
+    final file = _services.files.originalFile(_entry.sha);
+    if (!await file.exists()) {
+      _snack('${_entry.name} is no longer cached');
+      return;
+    }
+    try {
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path, mimeType: 'application/octet-stream')],
+          fileNameOverrides: [_entry.name],
         ),
-      ],
-      fileNameOverrides: [_entry.name],
-    ),
-  );
+      );
+    } on PlatformException catch (e) {
+      _snack('Could not share: ${e.message ?? e.code}');
+    }
+  }
 
   static String _safeFileName(String name) {
     final base = name.split('/').last.split(r'\').last.trim();
@@ -305,16 +422,22 @@ class _ViewerPageState extends State<ViewerPage> {
     MaterialPageRoute<void>(builder: (_) => SettingsPage(services: _services)),
   );
 
+  // Always starts a fresh WebView rather than reloading: after a renderer
+  // crash the old instance is unusable, and a page stuck in a bad JS state
+  // is not worth telling apart from one.
   void _retry() {
-    _readyTimer?.cancel();
+    _tearDownWebView();
     setState(() {
       _error = null;
       _stats = null;
+      _layers = const [];
+      _picked = null;
       _ready = null;
       _triedBase64 = false;
       _progress = const LoadProgress(phase: LoadPhase.fetch, progress: 0);
+      _webViewGeneration++;
     });
-    _controller?.reload();
+    _armReadyTimer();
   }
 
   void _snack(String message) {
@@ -336,6 +459,7 @@ class _ViewerPageState extends State<ViewerPage> {
         children: [
           Positioned.fill(
             child: InAppWebView(
+              key: ValueKey(_webViewGeneration),
               initialUrlRequest: URLRequest(url: WebUri(_indexUrl)),
               initialSettings: InAppWebViewSettings(
                 webViewAssetLoader: WebViewAssetLoader(
@@ -353,8 +477,13 @@ class _ViewerPageState extends State<ViewerPage> {
                 mediaPlaybackRequiresUserGesture: false,
                 transparentBackground: true,
                 supportZoom: false,
-                disableVerticalScroll: true,
-                disableHorizontalScroll: true,
+                // The page itself blocks scrolling (viewer.css: overflow
+                // hidden, touch-action none). The plugin's disable*Scroll
+                // flags must NOT be used: they swallow every ACTION_MOVE
+                // before Chromium sees it, killing orbit/pan/pinch.
+                overScrollMode: OverScrollMode.NEVER,
+                verticalScrollBarEnabled: false,
+                horizontalScrollBarEnabled: false,
                 useHybridComposition: true,
               ),
               onWebViewCreated: _onWebViewCreated,
@@ -400,6 +529,7 @@ class _ViewerPageState extends State<ViewerPage> {
                         builder: (_, settings, _) => UnmeshedBanner(
                           count: stats.unmeshed.total,
                           backendConfigured: settings.hasBackend,
+                          serverTried: _showingMeshed,
                           onMeshOnServer: _meshOnServer,
                           onSetupServer: _openSettings,
                         ),

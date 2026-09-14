@@ -63,14 +63,19 @@ class FileService {
     return true;
   }
 
-  File originalFile(String sha) => File('${modelsDir.path}/$sha.3dm');
+  static String originalName(String sha) => '$sha.3dm';
 
-  File meshedFile(String sha) => File('${modelsDir.path}/$sha.meshed.3dm');
+  static String meshedName(String sha) => '$sha.meshed.3dm';
+
+  File originalFile(String sha) =>
+      File('${modelsDir.path}/${originalName(sha)}');
+
+  File meshedFile(String sha) => File('${modelsDir.path}/${meshedName(sha)}');
 
   /// The file name (inside [modelsDir]) the viewer should load: the
   /// server-meshed variant when it exists, else the original.
   Future<String> preferredFileName(String sha) async =>
-      await meshedFile(sha).exists() ? '$sha.meshed.3dm' : '$sha.3dm';
+      await meshedFile(sha).exists() ? meshedName(sha) : originalName(sha);
 
   /// Opens the system picker and imports the chosen file. Returns null when
   /// the user cancels; throws [InvalidModelFileException] for non-.3dm data.
@@ -97,28 +102,33 @@ class FileService {
     final temp = File(
       '${modelsDir.path}/.import-${DateTime.now().microsecondsSinceEpoch}.tmp',
     );
-    final sink = temp.openWrite();
     final digest = _DigestSink();
     final hasher = sha256.startChunkedConversion(digest);
     final head = BytesBuilder(copy: false);
     var magicChecked = false;
     var size = 0;
     try {
-      await for (final chunk in source) {
-        if (!magicChecked) {
-          head.add(chunk);
-          if (head.length >= magicBytes.length) {
-            if (!hasMagic(head.toBytes())) throw _notRhino(name);
-            magicChecked = true;
+      // Each chunk is awaited onto disk before the next one is pulled, so a
+      // fast source cannot run ahead of the write and pile up in memory.
+      final out = await temp.open(mode: FileMode.write);
+      try {
+        await for (final chunk in source) {
+          if (!magicChecked) {
+            head.add(chunk);
+            if (head.length >= magicBytes.length) {
+              if (!hasMagic(head.toBytes())) throw _notRhino(name);
+              magicChecked = true;
+            }
           }
+          hasher.add(chunk);
+          await out.writeFrom(chunk);
+          size += chunk.length;
         }
-        hasher.add(chunk);
-        sink.add(chunk);
-        size += chunk.length;
+      } finally {
+        await out.close();
       }
       if (!magicChecked) throw _notRhino(name);
       hasher.close();
-      await sink.close();
       final sha = digest.value.toString();
       final target = originalFile(sha);
       if (await target.exists()) {
@@ -128,7 +138,6 @@ class FileService {
       }
       return ImportedModel(sha: sha, name: name, size: size, file: target);
     } catch (_) {
-      await sink.close();
       if (await temp.exists()) await temp.delete();
       rethrow;
     }
@@ -140,9 +149,28 @@ class FileService {
         'Server response is not a .3dm file',
       );
     }
+    await modelsDir.create(recursive: true);
     final file = meshedFile(sha);
-    await file.writeAsBytes(bytes, flush: true);
+    // Written next to the target and renamed into place, so a kill or a full
+    // disk mid-write cannot leave a truncated .meshed.3dm shadowing the
+    // original.
+    final temp = File(
+      '${modelsDir.path}/.meshed-${DateTime.now().microsecondsSinceEpoch}.tmp',
+    );
+    try {
+      await temp.writeAsBytes(bytes, flush: true);
+      await temp.rename(file.path);
+    } catch (_) {
+      if (await temp.exists()) await temp.delete();
+      rethrow;
+    }
     return file;
+  }
+
+  /// Deletes the server-meshed copy so the original is loaded again.
+  Future<void> discardMeshed(String sha) async {
+    final file = meshedFile(sha);
+    if (await file.exists()) await file.delete();
   }
 
   static InvalidModelFileException _notRhino(String name) =>

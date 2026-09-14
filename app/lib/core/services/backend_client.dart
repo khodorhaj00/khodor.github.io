@@ -119,6 +119,7 @@ class BackendClient {
   final Duration meshTimeout;
 
   /// Builds `<base>/<path>` tolerating a missing scheme and trailing slashes.
+  /// Throws a `bad_url` [BackendException] for input `dart:io` would reject.
   static Uri endpoint(
     String baseUrl,
     String path, {
@@ -127,7 +128,19 @@ class BackendClient {
     var base = baseUrl.trim();
     if (!base.contains('://')) base = 'http://$base';
     base = base.replaceAll(RegExp(r'/+$'), '');
-    final uri = Uri.parse('$base/$path');
+    final Uri uri;
+    try {
+      uri = Uri.parse('$base/$path');
+    } on FormatException catch (e) {
+      throw _badUrl(e.message);
+    }
+    if (uri.scheme != 'http' && uri.scheme != 'https') {
+      throw _badUrl('Unsupported scheme "${uri.scheme}"');
+    }
+    if (uri.host.isEmpty) throw _badUrl('Missing host');
+    if (uri.hasPort && (uri.port < 1 || uri.port > 65535)) {
+      throw _badUrl('Invalid port ${uri.port}');
+    }
     return query.isEmpty ? uri : uri.replace(queryParameters: query);
   }
 
@@ -138,10 +151,19 @@ class BackendClient {
           .timeout(healthTimeout),
     );
     _throwIfError(response);
-    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    } on FormatException {
+      throw BackendException(
+        statusCode: response.statusCode,
+        code: 'bad_response',
+        detail: 'Health response is not JSON (not the appserver?)',
+      );
+    }
     if (decoded is! Map) {
-      throw const BackendException(
-        statusCode: 200,
+      throw BackendException(
+        statusCode: response.statusCode,
         code: 'bad_response',
         detail: 'Health response is not a JSON object',
       );
@@ -221,6 +243,9 @@ class BackendClient {
   static int _headerInt(http.Response response, String name) =>
       int.tryParse(response.headers[name] ?? '') ?? 0;
 
+  static BackendException _badUrl(String detail) =>
+      BackendException(statusCode: 0, code: 'bad_url', detail: detail);
+
   static Future<http.Response> _guard(
     Future<http.Response> Function() request,
   ) async {
@@ -236,6 +261,12 @@ class BackendClient {
       throw BackendException(statusCode: 0, code: 'network', detail: e.message);
     } on SocketException catch (e) {
       throw BackendException(statusCode: 0, code: 'network', detail: e.message);
+    } on IOException catch (e) {
+      // TLS handshake / certificate failures are not wrapped by package:http.
+      throw BackendException(statusCode: 0, code: 'network', detail: '$e');
+    } on FormatException catch (e) {
+      // dart:io rejects some host spellings only when connecting.
+      throw _badUrl(e.message);
     }
   }
 

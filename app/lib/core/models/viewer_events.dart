@@ -71,6 +71,17 @@ class LoadResult {
   final String name;
   final ModelStats? stats;
   final String? error;
+
+  // viewer.js reports no failing phase, so a fetch failure is recognised by
+  // the messages its fetch path produces: its own `HTTP <status> while
+  // fetching <url>` and Chromium's TypeError texts for a failed fetch().
+  static final RegExp _fetchErrorPattern = RegExp(
+    r'^HTTP \d+ while fetching |Failed to fetch|network error',
+  );
+
+  /// True when the file could not be fetched from its URL, as opposed to
+  /// failing to parse or build; only then is loading it inline worth a try.
+  bool get isFetchFailure => !ok && _fetchErrorPattern.hasMatch(error ?? '');
 }
 
 class ExportResult {

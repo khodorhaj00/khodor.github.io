@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -125,6 +126,65 @@ void main() {
         throwsA(isA<InvalidModelFileException>()),
       );
       expect(cleaned, 2, reason: 'cleanup runs even when the import fails');
+    },
+  );
+
+  test('importStream writes each chunk before pulling the next one', () async {
+    final service = FileService(modelsDir: dir);
+    const chunk = 4096;
+    final bytes = rhinoBytes('x' * (chunk * 8));
+    final onDiskWhenAsked = <int>[];
+    Stream<List<int>> probing() async* {
+      for (var i = 0; i < bytes.length; i += chunk) {
+        final temp = dir
+            .listSync()
+            .whereType<File>()
+            .where((f) => f.path.endsWith('.tmp'))
+            .toList();
+        onDiskWhenAsked.add(temp.isEmpty ? 0 : temp.single.lengthSync());
+        yield bytes.sublist(i, min(i + chunk, bytes.length));
+      }
+    }
+
+    final imported = await service.importStream(probing(), name: 'p');
+    expect(await imported.file.readAsBytes(), bytes);
+    expect(onDiskWhenAsked, hasLength(9));
+    for (var i = 0; i < onDiskWhenAsked.length; i++) {
+      expect(
+        onDiskWhenAsked[i],
+        i * chunk,
+        reason: 'chunk $i was pulled before the previous ones were on disk',
+      );
+    }
+  });
+
+  test(
+    'writeMeshed replaces the copy atomically; discardMeshed removes it',
+    () async {
+      final service = FileService(modelsDir: Directory('${dir.path}/models'));
+      await service.writeMeshed('s', rhinoBytes('v1'));
+      final meshed = await service.writeMeshed('s', rhinoBytes('v2'));
+      expect(await meshed.readAsBytes(), rhinoBytes('v2'));
+      expect(service.modelsDir.listSync().map((e) => e.path), [
+        meshed.path,
+      ], reason: 'no temp file is left behind');
+
+      // A rename that cannot succeed (target is a directory) must not leave
+      // the temp file either.
+      await Directory(service.meshedFile('d').path).create();
+      await expectLater(
+        service.writeMeshed('d', rhinoBytes('v3')),
+        throwsA(isA<FileSystemException>()),
+      );
+      expect(
+        service.modelsDir.listSync().map((e) => e.path),
+        unorderedEquals([meshed.path, service.meshedFile('d').path]),
+      );
+
+      await service.discardMeshed('s');
+      expect(await meshed.exists(), isFalse);
+      expect(await service.preferredFileName('s'), 's.3dm');
+      await service.discardMeshed('s');
     },
   );
 

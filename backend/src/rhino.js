@@ -10,13 +10,22 @@ export function hasMagic(bytes) {
 }
 
 /**
- * Calls `.delete()` on rhino3dm (embind) handles, ignoring null/undefined. Not for table handles
- * (`objects()`, `layers()`, ...): their `delete(id)` is a bound method that removes an entry.
+ * Frees rhino3dm (embind) handles, ignoring null/undefined. The destructor is taken from embind's
+ * shared ClassHandle prototype rather than from the handle: the table classes (`objects()`,
+ * `layers()`, `materials()`) shadow `delete` with `delete(id)`, which removes an entry, and every
+ * table keeps the whole parsed model alive in WASM memory until it is destroyed.
  */
 export function release(...handles) {
   for (const handle of handles) {
-    if (handle && typeof handle.delete === 'function') handle.delete();
+    if (handle) destructorOf(handle).call(handle);
   }
+}
+
+function destructorOf(handle) {
+  let proto = Object.getPrototypeOf(handle);
+  while (proto !== null && !Object.hasOwn(proto, 'isDeleted')) proto = Object.getPrototypeOf(proto);
+  if (proto === null) throw new TypeError('release(): not a rhino3dm handle');
+  return proto.delete;
 }
 
 export function meshingParameters(rhino, quality) {

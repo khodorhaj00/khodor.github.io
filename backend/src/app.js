@@ -50,9 +50,9 @@ function mapError(err, maxUploadMb) {
     return { status: 502, code: 'compute_error', detail: err.message };
   }
   if (err?.type === 'entity.too.large') return mapError(tooLarge(maxUploadMb));
-  // body-parser's own 4xx (aborted request, bad encoding, ...)
+  // body-parser's own 4xx: unsupported Content-Encoding (415), truncated or aborted body (400), ...
   if (typeof err?.status === 'number' && err.status >= 400 && err.status < 500) {
-    return { status: err.status, code: 'invalid_file', detail: err.message };
+    return { status: err.status, code: 'bad_request', detail: err.message };
   }
   return { status: 500, code: 'internal', detail: 'internal error' };
 }
@@ -71,7 +71,11 @@ export function createApp({ config = loadConfig({}), compute = null, logger = si
 
   app.use((req, res, next) => {
     const t0 = performance.now();
-    res.on('finish', () => {
+    let finished = false;
+    res.on('finish', () => { finished = true; });
+    // 'close' fires whether the response was delivered or the client dropped the connection
+    // mid-upload; 'finish' only in the first case.
+    res.on('close', () => {
       logger.info({
         method: req.method,
         path: req.path,
@@ -81,6 +85,7 @@ export function createApp({ config = loadConfig({}), compute = null, logger = si
         bytesOut: Number(res.getHeader('content-length') ?? 0),
         meshed: res.locals.meshed ?? 0,
         skipped: res.locals.skipped ?? 0,
+        aborted: !finished,
       });
     });
     next();
@@ -98,6 +103,15 @@ export function createApp({ config = loadConfig({}), compute = null, logger = si
 
   app.use((req, res, next) => {
     if (config.appApiKey && !keysMatch(config.appApiKey, req.get('x-api-key'))) return next(unauthorized());
+    next();
+  });
+
+  // body-parser rejects an oversize Content-Length too, but only answers after the whole body has
+  // been received. Refusing up front lets the client stop uploading (Connection: close below);
+  // body-parser's limit still guards chunked bodies, which declare no length.
+  const maxBodyBytes = config.maxUploadMb * 1024 * 1024;
+  app.use((req, res, next) => {
+    if (Number(req.headers['content-length']) > maxBodyBytes) return next(tooLarge(config.maxUploadMb));
     next();
   });
 
@@ -159,7 +173,8 @@ export function createApp({ config = loadConfig({}), compute = null, logger = si
     } else if (mapped.status >= 500) {
       logger.warn({ msg: 'upstream failure', method: req.method, path: req.path, error: mapped.code, detail: mapped.detail });
     }
-    // The body may be unread on 413; closing avoids a stalled keep-alive connection.
+    // The body is unread on 413: with Connection: close Node destroys the socket once the response
+    // is flushed, so the client stops uploading instead of pushing the rest into a dead connection.
     if (mapped.status === 413) res.set('Connection', 'close');
     res.status(mapped.status).json({ error: mapped.code, detail: mapped.detail });
   });

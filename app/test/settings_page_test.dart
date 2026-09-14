@@ -133,6 +133,37 @@ void main() {
     expect(find.text('Failed: HTTP 401 unauthorized: bad key'), findsOneWidget);
   });
 
+  testWidgets(
+    'Test connection always shows a result for unclassified failures',
+    (tester) async {
+      await services.settings.update(
+        const AppSettings(backendUrl: 'http://srv:8080'),
+      );
+      respond = (_) => http.Response('<html>landing page</html>', 200);
+      await pumpPage(tester);
+      await tester.tap(find.text('Test connection'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text(
+          'Failed: HTTP 200 bad_response: Health response is not JSON (not the appserver?)',
+        ),
+        findsOneWidget,
+      );
+
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Backend URL'),
+        'http://192.168.1.10:abc',
+      );
+      await tester.tap(find.text('Test connection'));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('Failed: bad_url: Invalid port'),
+        findsOneWidget,
+      );
+      expect(find.text('Test connection'), findsOneWidget);
+    },
+  );
+
   testWidgets('Test connection without a URL asks for one', (tester) async {
     await pumpPage(tester);
     await tester.tap(find.text('Test connection'));

@@ -21,13 +21,17 @@ curl http://localhost:8080/health
 
 Without Docker: `npm ci && npm start` (Node 22+). Tests: `npm test` (offline, Compute is faked).
 
+Under docker compose `COMPUTE_URL` defaults to `http://host.docker.internal:5000/` (the Docker
+host; `localhost` inside the container is the appserver itself) and `COMPUTE_URL=` in `.env`
+disables Compute, like an empty value does without Docker.
+
 ## Environment
 
 | Var | Default | Meaning |
 |---|---|---|
 | `PORT` | `8080` | listen port |
 | `APP_API_KEY` | (empty) | if set, every request except `GET /health` must send `X-Api-Key` equal to it (constant-time compare) |
-| `COMPUTE_URL` | `http://localhost:5000/` | Rhino.Compute base URL (`rhino.compute` front end, port 5000 by default). **Empty** = Compute disabled |
+| `COMPUTE_URL` | `http://localhost:5000/` (`http://host.docker.internal:5000/` under docker compose) | Rhino.Compute base URL (`rhino.compute` front end, port 5000 by default). **Empty** = Compute disabled |
 | `COMPUTE_API_KEY` | (empty) | sent as the `RhinoComputeKey` header |
 | `COMPUTE_TIMEOUT_MS` | `120000` | per Compute call |
 | `COMPUTE_BATCH` | `20` | Breps per Compute call |
@@ -46,10 +50,10 @@ Errors are JSON: `{ "error": "<code>", "detail": "<text>" }`.
 | Status | `error` | When |
 |---|---|---|
 | 400 | `invalid_file` | body empty, magic bytes missing, or rhino3dm cannot parse it |
-| 400 | `bad_request` | `quality` is not `draft`, `default` or `fine` |
+| 400 | `bad_request` | `quality` is not `draft`, `default` or `fine`; the body was cut short or aborted (415 for a `Content-Encoding` other than identity/gzip/deflate/br) |
 | 401 | `unauthorized` | `APP_API_KEY` set and `X-Api-Key` missing/wrong |
 | 404 | `not_found` | unknown route |
-| 413 | `too_large` | body above `MAX_UPLOAD_MB` |
+| 413 | `too_large` | body above `MAX_UPLOAD_MB` (answered from the `Content-Length` header before the body is read; the connection is then closed) |
 | 502 | `compute_unreachable` | Compute not configured or not reachable over the network |
 | 502 | `compute_error` | Compute answered with a non-2xx status (`detail` carries its message) |
 | 504 | `compute_timeout` | Compute did not answer within `COMPUTE_TIMEOUT_MS` |
@@ -128,8 +132,10 @@ container. Run it on a Windows VM or workstation reachable from the appserver:
   size in memory. Run several replicas behind a load balancer for throughput rather than expecting
   one process to overlap requests.
 * Logging: one JSON line per request on stdout —
-  `{ts, level, method, path, status, ms, bytesIn, bytesOut, meshed, skipped}`. Compute failures
-  are logged at `warn`, unexpected errors at `error` with the stack.
+  `{ts, level, method, path, status, ms, bytesIn, bytesOut, meshed, skipped, aborted}`; `aborted`
+  is `true` when the client dropped the connection before the response was delivered (an upload
+  cut short by the phone going to sleep, for example). Compute failures are logged at `warn`,
+  unexpected errors at `error` with the stack.
 * Only the API-key check protects the endpoints; put the service behind TLS (reverse proxy) when it
   is reachable from outside the workshop network.
 

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -27,6 +28,26 @@ void main() {
         query: {'quality': 'fine', 'name': 'a b.3dm'},
       );
       expect(withQuery.queryParameters, {'quality': 'fine', 'name': 'a b.3dm'});
+    });
+
+    test('rejects URLs dart:io could not connect to with bad_url', () {
+      for (final bad in [
+        'http://192.168.1.10:abc',
+        'http:///health',
+        'ftp://srv',
+        'http://srv:99999',
+        'http://[::1',
+      ]) {
+        expect(
+          () => BackendClient.endpoint(bad, 'health'),
+          throwsA(
+            isA<BackendException>()
+                .having((e) => e.statusCode, 'status', 0)
+                .having((e) => e.code, 'code', 'bad_url'),
+          ),
+          reason: bad,
+        );
+      }
     });
   });
 
@@ -126,6 +147,62 @@ void main() {
           isA<BackendException>()
               .having((e) => e.statusCode, 'status', 0)
               .having((e) => e.code, 'code', 'network'),
+        ),
+      );
+    });
+
+    test('a bad URL fails the call itself, not the caller', () async {
+      final client = MockClient((_) async => http.Response('{}', 200));
+      expect(
+        () => BackendClient(client: client).health('http://h:abc'),
+        throwsA(
+          isA<BackendException>().having((e) => e.code, 'code', 'bad_url'),
+        ),
+      );
+    });
+
+    test('a non-JSON 2xx body (wrong server) is bad_response', () async {
+      final client = MockClient(
+        (_) async => http.Response('<html>landing page</html>', 200),
+      );
+      expect(
+        () => BackendClient(client: client).health('http://h'),
+        throwsA(
+          isA<BackendException>()
+              .having((e) => e.statusCode, 'status', 200)
+              .having((e) => e.code, 'code', 'bad_response'),
+        ),
+      );
+    });
+
+    test('TLS failures (not wrapped by package:http) become network', () async {
+      final client = MockClient(
+        (_) async =>
+            throw const HandshakeException('CERTIFICATE_VERIFY_FAILED'),
+      );
+      expect(
+        () => BackendClient(client: client).health('https://h'),
+        throwsA(
+          isA<BackendException>()
+              .having((e) => e.code, 'code', 'network')
+              .having(
+                (e) => e.detail,
+                'detail',
+                contains('CERTIFICATE_VERIFY_FAILED'),
+              ),
+        ),
+      );
+    });
+
+    test('host spellings rejected while connecting become bad_url', () async {
+      final client = MockClient(
+        (_) async =>
+            throw const FormatException('not a valid link-local address'),
+      );
+      expect(
+        () => BackendClient(client: client).health('http://h'),
+        throwsA(
+          isA<BackendException>().having((e) => e.code, 'code', 'bad_url'),
         ),
       );
     });

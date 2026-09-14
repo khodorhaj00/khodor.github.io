@@ -27,42 +27,42 @@ export async function* meshBrepsBatched(compute, brepsJson, mpJson, batchSize, t
 export async function meshFile(rhino, doc, { compute, quality, batchSize, logger }) {
   const objects = doc.objects();
   const handles = [];
-  const computeTargets = [];
   const replacements = [];
-  let skippedCount = 0;
-
-  const count = objects.count;
-  for (let i = 0; i < count; i++) {
-    const object = objects.get(i);
-    const geometry = object.geometry();
-    const attributes = object.attributes();
-    handles.push(object, geometry, attributes);
-    const type = geometry.objectType;
-
-    if (type === rhino.ObjectType.Brep) {
-      const meshes = brepFaceMeshes(rhino, geometry);
-      const hasMesh = meshes.length > 0;
-      release(...meshes);
-      if (!hasMesh) computeTargets.push({ attributes, brepJson: geometry.encode() });
-    } else if (type === rhino.ObjectType.Extrusion) {
-      const cached = extrusionMesh(rhino, geometry);
-      if (cached) { release(cached); continue; }
-      const brep = geometry.toBrep(true);
-      if (brep) {
-        computeTargets.push({ attributes, brepJson: brep.encode() });
-        release(brep);
-      } else {
-        skippedCount++;
-        logger.warn({ msg: 'extrusion could not be converted to a Brep', id: attributes.id });
-      }
-    } else if (type === rhino.ObjectType.SubD) {
-      const mesh = subdMesh(rhino, geometry);
-      if (mesh) replacements.push({ attributes, mesh }); else skippedCount++;
-    }
-  }
-
-  const timing = { computeMs: 0 };
   try {
+    const computeTargets = [];
+    let skippedCount = 0;
+
+    const count = objects.count;
+    for (let i = 0; i < count; i++) {
+      const object = objects.get(i);
+      const geometry = object.geometry();
+      const attributes = object.attributes();
+      handles.push(object, geometry, attributes);
+      const type = geometry.objectType;
+
+      if (type === rhino.ObjectType.Brep) {
+        const meshes = brepFaceMeshes(rhino, geometry);
+        const hasMesh = meshes.length > 0;
+        release(...meshes);
+        if (!hasMesh) computeTargets.push({ attributes, brepJson: geometry.encode() });
+      } else if (type === rhino.ObjectType.Extrusion) {
+        const cached = extrusionMesh(rhino, geometry);
+        if (cached) { release(cached); continue; }
+        const brep = geometry.toBrep(true);
+        if (brep) {
+          computeTargets.push({ attributes, brepJson: brep.encode() });
+          release(brep);
+        } else {
+          skippedCount++;
+          logger.warn({ msg: 'extrusion could not be converted to a Brep', id: attributes.id });
+        }
+      } else if (type === rhino.ObjectType.SubD) {
+        const mesh = subdMesh(rhino, geometry);
+        if (mesh) replacements.push({ attributes, mesh }); else skippedCount++;
+      }
+    }
+
+    const timing = { computeMs: 0 };
     if (computeTargets.length > 0) {
       if (!compute) {
         throw new HttpError(502, 'compute_unreachable', `${computeTargets.length} object(s) need tessellation but COMPUTE_URL is not configured`);
@@ -84,6 +84,6 @@ export async function meshFile(rhino, doc, { compute, quality, batchSize, logger
     }
     return { meshedCount: replacements.length, skippedCount, computeMs: Math.round(timing.computeMs) };
   } finally {
-    release(...replacements.map((r) => r.mesh), ...handles);
+    release(...replacements.map((r) => r.mesh), ...handles, objects);
   }
 }

@@ -183,6 +183,27 @@ void main() {
     await tester.tap(find.text('Mesh on server'));
     expect(meshed, 1);
     expect(find.textContaining('Save small'), findsOneWidget);
+
+    // Once the server-meshed copy is shown, the leftovers are what the
+    // server could not mesh: no point offering the same round trip again.
+    await tester.pumpWidget(
+      host(
+        UnmeshedBanner(
+          count: 1,
+          backendConfigured: true,
+          serverTried: true,
+          onMeshOnServer: () => meshed++,
+          onSetupServer: () => setup++,
+        ),
+      ),
+    );
+    expect(
+      find.text('1 object could not be meshed by the server'),
+      findsOneWidget,
+    );
+    expect(find.text('Mesh on server'), findsNothing);
+    expect(find.text('Set up server'), findsNothing);
+    expect(find.textContaining('Save small'), findsOneWidget);
   });
 
   testWidgets('StatsSheet renders counts, units and engine versions', (

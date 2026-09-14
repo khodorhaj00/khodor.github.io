@@ -104,7 +104,7 @@ class _RhinoViewerAppState extends State<RhinoViewerApp> {
     } on IOException catch (e) {
       _snack('Could not open file: $e');
     } finally {
-      if (await file.exists()) await file.delete();
+      await IntentService.discardIncoming(path);
     }
   }
 

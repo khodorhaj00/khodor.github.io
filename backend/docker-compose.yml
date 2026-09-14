@@ -9,7 +9,9 @@
 #   https://developer.rhino3d.com/guides/compute/configure-compute-for-production/
 # The RhinoComputeKey you configure there goes into COMPUTE_API_KEY below.
 #
-# Copy .env.example to .env and fill in the values; every variable has a default (see README).
+# Copy .env.example to .env and fill in the values. A variable that is not set at all gets the
+# default shown below; a variable set to an empty value is passed through empty, which for
+# COMPUTE_URL means "no Compute" (see README).
 services:
   appserver:
     build: .
@@ -20,14 +22,14 @@ services:
       - "${PORT:-8080}:8080"
     environment:
       PORT: "8080"
-      APP_API_KEY: "${APP_API_KEY:-}"
-      COMPUTE_URL: "${COMPUTE_URL:-http://host.docker.internal:5000/}"
-      COMPUTE_API_KEY: "${COMPUTE_API_KEY:-}"
-      COMPUTE_TIMEOUT_MS: "${COMPUTE_TIMEOUT_MS:-120000}"
-      COMPUTE_BATCH: "${COMPUTE_BATCH:-20}"
-      MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-200}"
-      MESH_QUALITY: "${MESH_QUALITY:-default}"
-      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      APP_API_KEY: "${APP_API_KEY-}"
+      COMPUTE_URL: "${COMPUTE_URL-http://host.docker.internal:5000/}"
+      COMPUTE_API_KEY: "${COMPUTE_API_KEY-}"
+      COMPUTE_TIMEOUT_MS: "${COMPUTE_TIMEOUT_MS-120000}"
+      COMPUTE_BATCH: "${COMPUTE_BATCH-20}"
+      MAX_UPLOAD_MB: "${MAX_UPLOAD_MB-200}"
+      MESH_QUALITY: "${MESH_QUALITY-default}"
+      LOG_LEVEL: "${LOG_LEVEL-info}"
     # host.docker.internal resolves to the Docker host on Docker Desktop; on Linux this line
     # provides it, useful when Compute runs in a Windows VM bridged onto the host's network.
     extra_hosts:

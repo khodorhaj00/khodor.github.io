@@ -9,12 +9,18 @@ class UnmeshedBanner extends StatelessWidget {
     super.key,
     required this.count,
     required this.backendConfigured,
+    this.serverTried = false,
     required this.onMeshOnServer,
     required this.onSetupServer,
   });
 
   final int count;
   final bool backendConfigured;
+
+  /// True when the server-meshed copy is what is on screen: what is left
+  /// unmeshed is what the server could not mesh, so the same round trip is
+  /// not offered again.
+  final bool serverTried;
   final VoidCallback onMeshOnServer;
   final VoidCallback onSetupServer;
 
@@ -40,18 +46,24 @@ class UnmeshedBanner extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '${formatCount(count)} object${count == 1 ? '' : 's'} have no render mesh',
+                  serverTried
+                      ? '${formatCount(count)} object${count == 1 ? '' : 's'} could not be meshed by the server'
+                      : '${formatCount(count)} object${count == 1 ? '' : 's'} have no render mesh',
                   style: const TextStyle(color: AppColors.text, fontSize: 13),
                 ),
-                const Text(
-                  'or re-save in Rhino with Save small unchecked',
-                  style: TextStyle(color: AppColors.muted, fontSize: 11),
+                Text(
+                  serverTried
+                      ? 're-save in Rhino with Save small unchecked'
+                      : 'or re-save in Rhino with Save small unchecked',
+                  style: const TextStyle(color: AppColors.muted, fontSize: 11),
                 ),
               ],
             ),
           ),
           const SizedBox(width: kGap),
-          if (backendConfigured)
+          if (serverTried)
+            const SizedBox.shrink()
+          else if (backendConfigured)
             FilledButton(
               onPressed: onMeshOnServer,
               style: FilledButton.styleFrom(minimumSize: const Size(0, 36)),

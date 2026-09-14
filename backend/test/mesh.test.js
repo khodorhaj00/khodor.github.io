@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { before, test } from 'node:test';
 import { ComputeError } from '../src/compute.js';
 import { rhinoReady } from '../src/rhino.js';
 import { boxMesh, createFakeCompute } from './helpers/fakeCompute.js';
-import { fixture, startServer } from './helpers/client.js';
+import { fixture, SAMPLES, startServer } from './helpers/client.js';
 
 let rhino;
 before(async () => { rhino = await rhinoReady; });
@@ -117,6 +118,26 @@ test('POST /mesh returns the original bytes untouched when nothing needs meshing
     assert.equal(res.headers.get('x-compute-ms'), '0');
     assert.ok(res.buffer.equals(bytes));
     assert.equal(compute.calls.length, 0);
+  } finally {
+    await server.close();
+  }
+});
+
+test('POST /mesh frees the parsed model between requests (WASM memory stays bounded)', async () => {
+  const bytes = readFileSync(new URL('Rhino_Logo.3dm', SAMPLES));
+  const server = startServer();
+  try {
+    const mesh = async () => {
+      const res = await server.post('/mesh', bytes);
+      assert.equal(res.status, 200, res.buffer.toString());
+      assert.equal(res.headers.get('x-meshed-count'), '6', 'the SubDs are meshed locally, the Breps carry render meshes');
+    };
+    const wasmBytes = () => { const m = process.memoryUsage(); return m.external - m.arrayBuffers; };
+    for (let i = 0; i < 3; i++) await mesh();
+    const before = wasmBytes();
+    for (let i = 0; i < 20; i++) await mesh();
+    const growth = wasmBytes() - before;
+    assert.ok(growth < 32 * 1024 * 1024, `WASM memory grew ${(growth / 1048576).toFixed(1)} MB over 20 requests`);
   } finally {
     await server.close();
   }

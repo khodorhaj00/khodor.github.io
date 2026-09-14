@@ -111,6 +111,19 @@ void main() {
     expect(recents!.first.sha, 'aaa', reason: 'opening moves it to the front');
   });
 
+  testWidgets('a second tap while a recent is opening is ignored', (
+    tester,
+  ) async {
+    await tester.runAsync(() => seedRecent('eee', 'twice.3dm'));
+    await tester.pumpWidget(app());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('twice.3dm'));
+    await tester.tap(find.text('twice.3dm'));
+    await settle(tester, () => opened.isNotEmpty && noSpinner());
+    await tester.pumpAndSettle();
+    expect(opened, hasLength(1));
+  });
+
   testWidgets('swipe deletes the entry and its file', (tester) async {
     await tester.runAsync(() => seedRecent('ccc', 'gone.3dm'));
     await tester.pumpWidget(app());

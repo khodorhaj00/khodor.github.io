@@ -51,6 +51,34 @@ void main() {
     expect(LoadResult.fromJson({'ok': false}).error, 'Unknown error');
   });
 
+  test('LoadResult.isFetchFailure only flags fetch-phase errors', () {
+    LoadResult failed(String error) =>
+        LoadResult.fromJson({'ok': false, 'name': 'a.3dm', 'error': error});
+    expect(
+      failed(
+        'HTTP 404 while fetching https://appassets.androidplatform.net/files/x.3dm',
+      ).isFetchFailure,
+      isTrue,
+    );
+    expect(failed('Failed to fetch').isFetchFailure, isTrue);
+    expect(failed('TypeError: network error').isFetchFailure, isTrue);
+    expect(
+      failed("Cannot read properties of null (reading 'objects')")
+          .isFetchFailure,
+      isFalse,
+    );
+    expect(failed('superseded by a newer load()').isFetchFailure, isFalse);
+    expect(LoadResult.fromJson({'ok': false}).isFetchFailure, isFalse);
+    expect(
+      LoadResult.fromJson({
+        'ok': true,
+        'name': 'a.3dm',
+        'stats': sampleStatsJson,
+      }).isFetchFailure,
+      isFalse,
+    );
+  });
+
   test('ExportResult', () {
     final ok = ExportResult.fromJson({
       'ok': true,

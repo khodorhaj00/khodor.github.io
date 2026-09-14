@@ -75,19 +75,24 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _openRecent(RecentFile entry) async {
     if (_busy) return;
-    final files = widget.services.files;
-    if (!await files.originalFile(entry.sha).exists()) {
-      await widget.services.cache.remove(entry.sha);
-      _snack('${entry.name} is no longer cached');
-      return;
+    setState(() => _busy = true);
+    try {
+      final files = widget.services.files;
+      if (!await files.originalFile(entry.sha).exists()) {
+        await widget.services.cache.remove(entry.sha);
+        _snack('${entry.name} is no longer cached');
+        return;
+      }
+      final touched = await widget.services.cache.recordOpen(
+        sha: entry.sha,
+        name: entry.name,
+        size: entry.size,
+      );
+      if (!mounted) return;
+      await widget.onOpen(context, touched);
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
-    final touched = await widget.services.cache.recordOpen(
-      sha: entry.sha,
-      name: entry.name,
-      size: entry.size,
-    );
-    if (!mounted) return;
-    await widget.onOpen(context, touched);
   }
 
   // Dismissible requires its row to leave the tree as soon as it is

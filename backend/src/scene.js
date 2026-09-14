@@ -8,25 +8,33 @@ const FALLBACK_COLOR = { r: 128, g: 128, b: 128, a: 255 };
 function readLayers(doc) {
   const table = doc.layers();
   const layers = [];
-  const count = table.count;
-  for (let i = 0; i < count; i++) {
-    const layer = table.get(i);
-    layers.push({ index: i, name: layer.name, fullPath: layer.fullPath, color: { ...layer.color }, visible: layer.visible });
-    release(layer);
+  try {
+    const count = table.count;
+    for (let i = 0; i < count; i++) {
+      const layer = table.get(i);
+      layers.push({ index: i, name: layer.name, fullPath: layer.fullPath, color: { ...layer.color }, visible: layer.visible });
+      release(layer);
+    }
+    return layers;
+  } finally {
+    release(table);
   }
-  return layers;
 }
 
 function readDefinitions(doc) {
   const table = doc.instanceDefinitions();
   const definitions = new Map();
-  const count = table.count;
-  for (let i = 0; i < count; i++) {
-    const definition = table.get(i);
-    definitions.set(definition.id, definition.getObjectIds());
-    release(definition);
+  try {
+    const count = table.count;
+    for (let i = 0; i < count; i++) {
+      const definition = table.get(i);
+      definitions.set(definition.id, definition.getObjectIds());
+      release(definition);
+    }
+    return definitions;
+  } finally {
+    release(table);
   }
-  return definitions;
 }
 
 /**
@@ -35,6 +43,7 @@ function readDefinitions(doc) {
  */
 function readObjects(rhino, doc, layers, handles) {
   const objects = doc.objects();
+  handles.push(objects);
   const entries = new Map();
   const topLevel = [];
   const count = objects.count;

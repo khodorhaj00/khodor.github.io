@@ -127,14 +127,22 @@ test('POST /convert skips unmeshed Breps without Compute and meshes them with Co
   }
 });
 
-test('POST /convert on Rhino_Logo.3dm meshes Breps from their render meshes and SubDs locally', async () => {
+/** The sample with its `subd` layer switched on, so SubDs are tessellated as well as Breps. */
+function rhinoLogoWithSubd() {
   const doc = rhino.File3dm.fromByteArray(new Uint8Array(readFileSync(new URL('Rhino_Logo.3dm', SAMPLES))));
   const subdLayer = doc.layers().get(4);
   assert.equal(subdLayer.name, 'subd');
   subdLayer.visible = true;
   const bytes = Buffer.from(doc.toByteArray());
   doc.delete();
+  return bytes;
+}
 
+/** WASM linear memory shows up in `external` but not in `arrayBuffers` (Node's own Buffers). */
+const wasmBytes = () => { const m = process.memoryUsage(); return m.external - m.arrayBuffers; };
+
+test('POST /convert on Rhino_Logo.3dm meshes Breps from their render meshes and SubDs locally', async () => {
+  const bytes = rhinoLogoWithSubd();
   const server = startServer();
   try {
     const res = await server.post('/convert?name=Rhino_Logo.3dm', bytes);
@@ -146,6 +154,23 @@ test('POST /convert on Rhino_Logo.3dm meshes Breps from their render meshes and 
     assert.equal(json.meshes.length, 12);
     assert.equal(json.nodes.filter((n) => n.extras?.layer === 'subd').length, 6);
     assert.equal(json.nodes.filter((n) => n.extras?.layer === 'brep').length, 6);
+  } finally {
+    await server.close();
+  }
+});
+
+test('POST /convert frees the parsed model between requests (WASM memory stays bounded)', async () => {
+  const bytes = rhinoLogoWithSubd();
+  const server = startServer();
+  try {
+    const convert = async () => { const res = await server.post('/convert', bytes); assert.equal(res.status, 200); };
+    for (let i = 0; i < 3; i++) await convert();
+    const before = wasmBytes();
+    for (let i = 0; i < 30; i++) await convert();
+    const growth = wasmBytes() - before;
+    // A leaked model costs ~10 MB per request on this file; the WASM heap never shrinks, so
+    // once the high-water mark is reached further requests must not move it.
+    assert.ok(growth < 32 * 1024 * 1024, `WASM memory grew ${(growth / 1048576).toFixed(1)} MB over 30 requests`);
   } finally {
     await server.close();
   }

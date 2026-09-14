@@ -79,7 +79,9 @@ class _SettingsPageState extends State<SettingsPage> {
       _testResult = health.ok
           ? 'OK · v${health.version} · $compute'
           : 'Server reports not ok';
-    } on BackendException catch (e) {
+    } catch (e) {
+      // BackendException covers the classified failures; anything else must
+      // still produce a visible result instead of a silently reset button.
       _testResult = 'Failed: $e';
     } finally {
       if (mounted) setState(() => _testing = false);

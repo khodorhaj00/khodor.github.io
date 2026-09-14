@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhino_viewer/core/services/intent_service.dart';
@@ -43,4 +45,28 @@ void main() {
     service.dispose();
     expect(received, ['/cache/incoming/a.3dm']);
   });
+
+  test(
+    'discardIncoming removes the per-intent directory, else the file',
+    () async {
+      final root = await Directory.systemTemp.createTemp('intent_test');
+      try {
+        final perIntent = File('${root.path}/incoming/9f1c/Untitled.3dm');
+        await perIntent.create(recursive: true);
+        await IntentService.discardIncoming(perIntent.path);
+        expect(perIntent.parent.existsSync(), isFalse);
+        expect(Directory('${root.path}/incoming').existsSync(), isTrue);
+
+        final flat = File('${root.path}/elsewhere/Untitled.3dm');
+        await flat.create(recursive: true);
+        await IntentService.discardIncoming(flat.path);
+        expect(flat.existsSync(), isFalse);
+        expect(flat.parent.existsSync(), isTrue);
+
+        await IntentService.discardIncoming('${root.path}/incoming/gone/x.3dm');
+      } finally {
+        await root.delete(recursive: true);
+      }
+    },
+  );
 }
