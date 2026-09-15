@@ -170,9 +170,15 @@ class ViewerStatus {
 }
 
 /// Plain-language reason and next step for a stage that never finished.
-String stageTimeoutMessage(ViewerStage stage) {
+///
+/// [detail] is whatever the app learned about the cause while it was waiting
+/// — an error nobody caught, or Android's own answer about its WebView. It is
+/// the only text the error panel gets, so a stall with a known cause must
+/// carry it here rather than leave it in the log.
+String stageTimeoutMessage(ViewerStage stage, {String? detail}) {
   final what = switch (stage) {
-    ViewerStage.creatingView => 'The viewer never started.',
+    ViewerStage.creatingView =>
+      'The viewer never started: Android never built the WebView.',
     ViewerStage.pageLoading =>
       'The viewer page did not finish loading from the app.',
     ViewerStage.pageLoaded =>
@@ -185,7 +191,8 @@ String stageTimeoutMessage(ViewerStage stage) {
     ViewerStage.shown => 'The model stopped responding.',
   };
   final seconds = stage.timeout?.inSeconds ?? 0;
-  return '$what Nothing happened for $seconds s at "${stage.label}". '
+  final also = detail == null ? '' : ' The app also reported: $detail.';
+  return '$what Nothing happened for $seconds s at "${stage.label}".$also '
       'Tap Retry, or Diagnostics to copy the details for support.';
 }
 

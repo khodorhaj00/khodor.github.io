@@ -11,6 +11,7 @@ import 'package:rhino_viewer/core/services/backend_client.dart';
 import 'package:rhino_viewer/core/services/cache_service.dart';
 import 'package:rhino_viewer/core/services/file_service.dart';
 import 'package:rhino_viewer/core/services/intent_service.dart';
+import 'package:rhino_viewer/core/services/platform_error_monitor.dart';
 import 'package:rhino_viewer/core/services/settings_service.dart';
 import 'package:rhino_viewer/features/settings/settings_page.dart';
 
@@ -43,6 +44,7 @@ void main() {
       ),
       settings: SettingsService(store),
       intents: IntentService(),
+      errors: PlatformErrorMonitor(),
     );
   });
 
@@ -274,5 +276,30 @@ void main() {
     await tester.pumpAndSettle();
     expect(File('${services.modelsDir.path}/abc.3dm').existsSync(), isFalse);
     expect(store.data.containsKey(CacheService.recentsKey), isFalse);
+  });
+
+  testWidgets('the hybrid rendering switch is on by default and persists', (
+    tester,
+  ) async {
+    // Tall enough for the whole page: ListView does not build what it cannot
+    // show, and the Viewer section is the last thing before About.
+    tester.view.physicalSize = const Size(400, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await pumpPage(tester);
+    final switchFinder = find.byType(SwitchListTile);
+    expect(tester.widget<SwitchListTile>(switchFinder).value, isTrue);
+
+    await tester.tap(switchFinder);
+    await settle(
+      tester,
+      () => !services.settings.value.hybridWebViewComposition,
+    );
+    await tester.pumpAndSettle();
+    expect(tester.widget<SwitchListTile>(switchFinder).value, isFalse);
+    // Survives a restart: the viewer reads this once, when a file is opened.
+    final reloaded = SettingsService(store);
+    await reloaded.load();
+    expect(reloaded.value.hybridWebViewComposition, isFalse);
   });
 }

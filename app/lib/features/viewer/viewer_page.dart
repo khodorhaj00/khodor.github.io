@@ -18,7 +18,9 @@ import '../../core/models/recent_file.dart';
 import '../../core/models/viewer_events.dart';
 import '../../core/services/backend_client.dart';
 import '../../core/services/file_service.dart';
+import '../../core/services/platform_error_monitor.dart';
 import '../../core/services/settings_service.dart';
+import '../../core/services/webview_provider.dart';
 import '../settings/settings_page.dart';
 import 'diagnostics_report.dart';
 import 'viewer_status.dart';
@@ -87,10 +89,22 @@ class _ViewerPageState extends State<ViewerPage> {
   ViewerBridge? _bridge;
   final List<StreamSubscription<Object?>> _subscriptions = [];
   late final ViewerStatus _status;
+  StreamSubscription<UncaughtAppError>? _errorSubscription;
+
+  /// Last error that reached the app with nobody listening, and what Android
+  /// answered about its WebView. Either can explain a stage that never
+  /// finished, so the watchdog's message carries whichever exists.
+  String? _uncaught;
+  WebViewProviderInfo? _webView;
 
   /// Bumped by [_retry]: a new key makes Flutter create a fresh platform
   /// WebView, which is the only way back from a dead render process.
   int _webViewGeneration = 0;
+
+  /// Which Android platform-view path this page's WebView uses. Read once
+  /// from settings and only ever changed through [_switchComposition], so the
+  /// mode cannot change under a live WebView.
+  late bool _hybridComposition;
 
   late RecentFile _entry = widget.entry;
   ViewerReadyInfo? _ready;
@@ -128,10 +142,15 @@ class _ViewerPageState extends State<ViewerPage> {
   void initState() {
     super.initState();
     _status = ViewerStatus(onChanged: _onStatusChanged, onStuck: _onStuck);
+    _hybridComposition = _services.settings.value.hybridWebViewComposition;
+    // Before the first build, so no platform-view failure can beat it.
+    _errorSubscription = _services.errors.errors.listen(_onUncaughtError);
+    unawaited(_probeWebView());
   }
 
   @override
   void dispose() {
+    unawaited(_errorSubscription?.cancel());
     _status.dispose();
     // Leaving the page must not leave the upload running in the background.
     _meshJob?.cancel.cancel();
@@ -153,7 +172,72 @@ class _ViewerPageState extends State<ViewerPage> {
   }
 
   void _onStuck(ViewerStage stage) {
-    if (_error == null) _fail(stageTimeoutMessage(stage));
+    if (_error == null) _fail(stageTimeoutMessage(stage, detail: _stallDetail));
+  }
+
+  /// The best explanation the app has for a stage that never finished.
+  String? get _stallDetail {
+    if (_uncaught != null) return _uncaught;
+    final webView = _webView;
+    if (webView != null && !webView.usable) {
+      return 'the Android WebView is ${webView.summary}';
+    }
+    return null;
+  }
+
+  /// Asks Android which WebView backs this app. A provider that is missing or
+  /// disabled, or a plugin that never registered, stops the platform view
+  /// from being created and has no other symptom, so the answer is worth
+  /// having before the watchdog runs out.
+  Future<void> _probeWebView() async {
+    final info = await probeWebViewProvider();
+    if (!mounted) return;
+    _webView = info;
+    _status.record(
+      info.usable ? ViewerEventLevel.info : ViewerEventLevel.error,
+      'Android WebView: ${info.summary}',
+    );
+    // A channel with no receiver is decisive on its own: without the plugin
+    // there is no view factory to create the WebView with, and no retry in
+    // this process can change that. A null package is not — the query itself
+    // can fail on older Android builds — so that one only colours the report
+    // and the watchdog's message.
+    if (!info.pluginMissing || _error != null) return;
+    _fail(
+      'This build of the app cannot open a WebView: its WebView component is '
+      'missing. Reinstalling the app is the only fix.',
+    );
+  }
+
+  /// The one failure the WebView cannot report itself. An Android platform
+  /// view is created by a future nobody awaits (flutter_inappwebview's
+  /// `onCreatePlatformView`, and `PlatformViewLink` itself), so a native
+  /// refusal — an unregistered view type, a WebView that cannot be
+  /// constructed — never reaches [_onWebViewCreated] or any other callback.
+  /// The monitor installed in `main()` is where it surfaces instead.
+  void _onUncaughtError(UncaughtAppError error) {
+    if (!mounted) return;
+    _uncaught = error.summary;
+    // A model on screen means the viewer works: a stray error from elsewhere
+    // in the app must not tear it down, but it still belongs in the report.
+    if (_stats != null) {
+      _status.record(ViewerEventLevel.warn, 'Uncaught: ${error.summary}');
+      return;
+    }
+    _status.record(ViewerEventLevel.error, 'Uncaught: ${error.summary}');
+    if (_error != null) return;
+    // Until the platform view exists, the only thing this page has asked the
+    // platform for is that view, so a platform-side error here is that
+    // request failing — and failing now beats timing out in silence.
+    final starting =
+        _bridge == null && _status.stage == ViewerStage.creatingView;
+    if (starting && (error.fromPlatform || error.mentionsPlatformView)) {
+      _fail(
+        'Android refused to create the viewer: ${error.summary}. Tap Retry; '
+        'if it keeps failing, check that Android System WebView is enabled '
+        'in Settings > Apps.',
+      );
+    }
   }
 
   void _onWebViewCreated(InAppWebViewController controller) {
@@ -553,6 +637,9 @@ class _ViewerPageState extends State<ViewerPage> {
     }
     return buildDiagnosticsReport(
       at: DateTime.now(),
+      webViewProvider: _webView?.summary ?? 'not answered yet',
+      composition: _compositionLabel,
+      uncaught: _services.errors.records,
       fileName: _entry.name,
       recordedSize: _entry.size,
       storedName: fileName,
@@ -635,12 +722,58 @@ class _ViewerPageState extends State<ViewerPage> {
     MaterialPageRoute<void>(builder: (_) => SettingsPage(services: _services)),
   );
 
+  /// How this page's WebView is composited, for the diagnostics dump: a
+  /// report that does not say which of the two paths drew it cannot be read.
+  String get _compositionLabel => _hybridComposition
+      ? 'hybrid — the WebView sits in the Android view tree'
+      : 'texture — the WebView is drawn into a Flutter texture';
+
+  /// Only worth offering when the WebView itself never came up: no controller
+  /// and no stage after *Creating the view*. Every later failure is the page's
+  /// or the file's, and the composition mode cannot change it.
+  bool get _canSwitchComposition =>
+      _bridge == null && _status.stage == ViewerStage.creatingView;
+
+  /// Rebuilds the WebView through the other Android platform-view path.
+  ///
+  /// Hybrid composition and the texture path reach the engine through
+  /// different code (`initExpensiveAndroidView` vs `initSurfaceAndroidView`,
+  /// with different native requirements), so a device that cannot create the
+  /// view one way may manage the other. The two render differently, so this
+  /// is offered as a way out of a dead viewer, not as a preference.
+  void _switchComposition() {
+    final next = !_hybridComposition;
+    _hybridComposition = next;
+    _retry();
+    // After the retry, which clears the log: this belongs to the new attempt,
+    // as the first thing its diagnostics report says about itself.
+    _status.record(
+      ViewerEventLevel.info,
+      'Switched to ${next ? 'hybrid' : 'texture'} composition',
+    );
+    unawaited(_persistComposition(next));
+  }
+
+  Future<void> _persistComposition(bool hybrid) async {
+    try {
+      await _services.settings.update(
+        _services.settings.value.copyWith(hybridWebViewComposition: hybrid),
+      );
+    } catch (_) {
+      // Losing the choice at the next launch is survivable; letting this
+      // failure go uncaught is not. A platform error arriving while the view
+      // is being created is read as the view itself failing, and a settings
+      // write must not be able to impersonate that.
+    }
+  }
+
   // Always starts a fresh WebView rather than reloading: after a renderer
   // crash the old instance is unusable, and a page stuck in a bad JS state
   // is not worth telling apart from one.
   void _retry() {
     _tearDownWebView();
     _status.reset();
+    _uncaught = null;
     setState(() {
       _error = null;
       _stats = null;
@@ -740,8 +873,10 @@ class _ViewerPageState extends State<ViewerPage> {
                 // Hybrid composition keeps the real WebView in the Android
                 // view tree (ARCHITECTURE.md §3.1); the alternative copies it
                 // into a Flutter texture, which is the path with the known
-                // WebGL artefacts.
-                useHybridComposition: true,
+                // WebGL artefacts. Default true, switchable from the error
+                // panel because the two use different engine code paths and
+                // only one of them may be broken on a given device.
+                useHybridComposition: _hybridComposition,
               ),
               onWebViewCreated: _onWebViewCreated,
               onLoadStart: (_, _) {
@@ -865,6 +1000,9 @@ class _ViewerPageState extends State<ViewerPage> {
               onRetry: _retry,
               onDiagnostics: _showDiagnostics,
               onBack: () => Navigator.of(context).maybePop(),
+              onAlternateRendering: _canSwitchComposition
+                  ? _switchComposition
+                  : null,
             ),
             ViewerOverlayKind.busy ||
             ViewerOverlayKind.progress => LoadingOverlay(

@@ -254,6 +254,24 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             ],
           ),
+          const _Section('Viewer'),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            value: settings.hybridWebViewComposition,
+            onChanged: (v) =>
+                _save((s) => s.copyWith(hybridWebViewComposition: v)),
+            title: const Text(
+              'Hybrid rendering',
+              style: TextStyle(color: AppColors.text, fontSize: 14),
+            ),
+            subtitle: const Text(
+              'Draws the 3D view as a real Android view. Turn this off only '
+              'if the viewer never appears; the alternative renders through '
+              'Flutter and can show artefacts. Takes effect the next time a '
+              'file is opened.',
+              style: TextStyle(color: AppColors.muted, fontSize: 12),
+            ),
+          ),
           const _Section('About'),
           const Text(
             'Files are parsed on the phone with rhino3dm and rendered with three.js. '

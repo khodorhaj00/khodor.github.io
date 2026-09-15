@@ -12,12 +12,18 @@ class ViewerErrorPanel extends StatelessWidget {
     required this.onRetry,
     required this.onDiagnostics,
     required this.onBack,
+    this.onAlternateRendering,
   });
 
   final String message;
   final VoidCallback onRetry;
   final VoidCallback onDiagnostics;
   final VoidCallback onBack;
+
+  /// Offered only when the WebView itself never came up, which is the one
+  /// failure the other composition mode can plausibly change. Null otherwise,
+  /// so a file that simply could not be parsed does not suggest it.
+  final VoidCallback? onAlternateRendering;
 
   @override
   Widget build(BuildContext context) {
@@ -65,6 +71,11 @@ class ViewerErrorPanel extends StatelessWidget {
                             onPressed: onDiagnostics,
                             child: const Text('Diagnostics'),
                           ),
+                          if (onAlternateRendering != null)
+                            OutlinedButton(
+                              onPressed: onAlternateRendering,
+                              child: const Text('Other rendering mode'),
+                            ),
                           FilledButton(
                             onPressed: onRetry,
                             style: FilledButton.styleFrom(

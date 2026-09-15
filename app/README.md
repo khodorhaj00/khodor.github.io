@@ -60,9 +60,26 @@ Resource failures, main-frame HTTP errors, JavaScript console errors and a dead 
 all reach the same place: the overlay's error line while nothing is on screen, a SnackBar once
 the model is up, and always the diagnostics log.
 
+One failure has no callback of its own: when Android refuses to create the platform view at all,
+no WebView callback ever fires and the rejected request is an uncaught asynchronous error that
+would otherwise only reach logcat. The app installs a handler for those in `main()` and the viewer
+listens, so *Creating the view* failing now shows Android's own sentence instead of a blank
+timeout. The page also asks Android once which WebView package backs the app, because a WebView
+provider that is disabled or missing stops the view being created and has no other symptom — a
+working browser does not prove it, since Chrome and the system WebView are separate packages.
+
+If the viewer never appears, the error panel also offers **Other rendering mode**. Android can
+composite a WebView two ways and they reach the system through different code, so a device that
+cannot create the view one way sometimes manages the other. The choice is remembered, and
+Settings → *Viewer* → *Hybrid rendering* sets it back. Hybrid (the default) puts the real WebView
+in the Android view tree; the alternative draws it through Flutter and can show artefacts, so only
+turn it off if the viewer does not come up.
+
 *Diagnostics* in the viewer's overflow menu shows `viewer.diagnostics()` from the page (absent,
 slow or throwing is fine — it is reported as such) next to the app-side facts: the asset URL, the
-model URL, the file name and its size on disk, every stage with timings, and the recent log.
+model URL, the file name and its size on disk, the Android WebView package and version, which
+compositing mode drew the view, every uncaught error in full, every stage with timings, and the
+recent log.
 *Copy* puts the whole block on the clipboard for a support mail.
 
 WebView settings worth knowing (`lib/features/viewer/viewer_page.dart`, all justified against the
@@ -72,8 +89,13 @@ a document-start user script also applies before `viewer.css` loads, since the p
 background-colour setting on Android. Android's two darkening levers (`forceDark`,
 `algorithmicDarkeningAllowed`) are pinned off so the phone's dark theme cannot wash the page out,
 hardware acceleration is pinned on (WebGL draws nothing without it), Safe Browsing is off (every
-byte the page loads is local), and hybrid composition stays on so the real WebView is in the
-Android view tree.
+byte the page loads is local), and hybrid composition is the default so the real WebView is in
+the Android view tree (switchable, above).
+
+Release APKs are built **without** R8: minification and resource shrinking are turned off in
+`android/app/build.gradle.kts`, which is a deliberate override of the Flutter SDK default rather
+than the default restated. The reasoning and the three things that must be proven before turning
+it back on are in `docs/ARCHITECTURE.md` §3.6b.
 
 ## Meshing server
 

@@ -2,6 +2,7 @@ import '../../app/format.dart';
 import '../../app/versions.dart';
 import '../../core/models/model_stats.dart';
 import '../../core/models/viewer_events.dart';
+import '../../core/services/platform_error_monitor.dart';
 import 'viewer_status.dart';
 
 /// Everything support needs in one copyable block: what the app tried to
@@ -17,6 +18,9 @@ String buildDiagnosticsReport({
   required String modelUrl,
   required ViewerStatus status,
   required String pageDiagnostics,
+  required String webViewProvider,
+  required String composition,
+  required List<UncaughtAppError> uncaught,
   ModelStats? stats,
   ViewerReadyInfo? ready,
   String? error,
@@ -38,6 +42,10 @@ String buildDiagnosticsReport({
     ..writeln('Stage     ${status.stage.label}')
     ..writeln('Elapsed   ${formatMs(status.elapsed.inMilliseconds)}')
     ..writeln('Error     ${error ?? 'none'}')
+    ..writeln('WebView   $webViewProvider')
+    // Which of the two Android platform-view paths drew this WebView; a
+    // report is unreadable without it once the mode can be switched.
+    ..writeln('Composite $composition')
     ..writeln(
       'Engine    three ${ready?.three ?? VendoredVersions.three} · '
       'rhino3dm ${ready?.rhino3dm ?? VendoredVersions.rhino3dm}'
@@ -77,6 +85,19 @@ String buildDiagnosticsReport({
     ..writeln()
     ..writeln('PAGE DIAGNOSTICS')
     ..writeln(pageDiagnostics)
+    ..writeln()
+    // The one failure with no other symptom: a platform view that was never
+    // created reports nothing to the WebView callbacks, so this is where a
+    // viewer that never started says why.
+    ..writeln('UNCAUGHT ERRORS');
+  if (uncaught.isEmpty) {
+    out.writeln('none');
+  } else {
+    for (final error in uncaught) {
+      out.writeln(error.detail);
+    }
+  }
+  out
     ..writeln()
     ..writeln('EVENTS');
   if (status.events.isEmpty) {

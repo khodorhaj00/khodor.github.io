@@ -1,6 +1,8 @@
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhino_viewer/core/models/model_stats.dart';
 import 'package:rhino_viewer/core/models/viewer_events.dart';
+import 'package:rhino_viewer/core/services/platform_error_monitor.dart';
 import 'package:rhino_viewer/features/viewer/diagnostics_report.dart';
 import 'package:rhino_viewer/features/viewer/viewer_status.dart';
 
@@ -228,7 +230,27 @@ void main() {
       expect(message, contains(stage.label));
       expect(message, contains('Retry'));
       expect(message, contains('Diagnostics'));
+      expect(
+        message,
+        isNot(contains('also reported')),
+        reason: 'no cause was known',
+      );
     }
+  });
+
+  test('a timeout with a known cause names it', () {
+    final message = stageTimeoutMessage(
+      ViewerStage.creatingView,
+      detail: 'the Android WebView is none',
+    );
+    expect(
+      message,
+      contains(
+        'The app also reported: the Android WebView is '
+        'none.',
+      ),
+    );
+    expect(message, contains('Retry'));
   });
 
   group('buildDiagnosticsReport', () {
@@ -251,6 +273,9 @@ void main() {
           modelUrl: 'https://appassets.androidplatform.net/files/ab12.3dm',
           status: status,
           pageDiagnostics: 'renderer: WebGL2 (SwiftShader)',
+          webViewProvider: 'com.google.android.webview 152.0.7258.60',
+          composition: 'hybrid — the WebView sits in the Android view tree',
+          uncaught: const [],
           stats: ModelStats.fromJson(sampleStatsJson),
           ready: const ViewerReadyInfo(three: 'r186', rhino3dm: '8.32.2'),
           error: 'The viewer did not get past "Viewer page loaded".',
@@ -269,6 +294,9 @@ void main() {
         expect(report, contains('Millimeters'));
         expect(report, contains('r186'));
         expect(report, contains('The viewer did not get past'));
+        expect(report, contains('WebView   com.google.android.webview'));
+        expect(report, contains('Composite hybrid'));
+        expect(report, contains('UNCAUGHT ERRORS\nnone'));
       });
     });
 
@@ -286,7 +314,23 @@ void main() {
           modelUrl: 'https://appassets.androidplatform.net/files/ab12.3dm',
           status: status,
           pageDiagnostics: 'not available: no WebView is running',
+          webViewProvider: 'not answered yet',
+          composition: 'texture — the WebView is drawn into a Flutter texture',
+          uncaught: [
+            UncaughtAppError.from(
+              PlatformException(
+                code: 'error',
+                message:
+                    'Trying to create a platform view of unregistered type: '
+                    'com.pichillilorenzo/flutter_inappwebview',
+              ),
+              StackTrace.empty,
+            ),
+          ],
         );
+        expect(report, contains('unregistered type'));
+        expect(report, contains('WebView   not answered yet'));
+        expect(report, contains('Composite texture'));
         expect(report, contains('not on disk'));
         expect(report, contains('no model loaded'));
         expect(report, contains('not available: no WebView is running'));

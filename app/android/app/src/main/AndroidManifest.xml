@@ -72,6 +72,14 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <!-- Never add io.flutter.embedding.android.EnableHcpp here. It sets the engine's
+             "enable hcpp and surface control" flag (FlutterEngineFlags.java:222-223), turning
+             on Hybrid Composition++, which is mutually exclusive with the hybrid composition
+             this viewer's WebView depends on: PlatformViewsChannel silently reroutes a hybrid
+             create request to the HCPP controller, and createForPlatformViewLayer throws
+             outright. It is off by default (settings.h:239, enable_surface_control = false) and
+             there is no other way to switch it on, so adding it would break every WebView in
+             the app with no visible error. -->
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

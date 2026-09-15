@@ -15,11 +15,16 @@ import 'core/services/cache_service.dart';
 import 'core/services/file_service.dart';
 import 'core/services/intent_service.dart';
 import 'core/services/key_value_store.dart';
+import 'core/services/platform_error_monitor.dart';
 import 'core/services/settings_service.dart';
 import 'features/home/home_page.dart';
 import 'features/viewer/viewer_page.dart';
 
 Future<void> main() async {
+  // First, and only here: this owns two process-wide hooks, and the failure
+  // it exists to catch happens before any screen could install it
+  // (ARCHITECTURE.md 3.1a).
+  final errors = PlatformErrorMonitor()..install();
   WidgetsFlutterBinding.ensureInitialized();
   final support = await getApplicationSupportDirectory();
   final temp = await getTemporaryDirectory();
@@ -42,6 +47,7 @@ Future<void> main() async {
         backend: BackendClient(client: http.Client()),
         settings: settings,
         intents: IntentService(),
+        errors: errors,
       ),
     ),
   );

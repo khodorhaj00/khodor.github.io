@@ -11,6 +11,7 @@ import 'package:rhino_viewer/core/services/backend_client.dart';
 import 'package:rhino_viewer/core/services/cache_service.dart';
 import 'package:rhino_viewer/core/services/file_service.dart';
 import 'package:rhino_viewer/core/services/intent_service.dart';
+import 'package:rhino_viewer/core/services/platform_error_monitor.dart';
 import 'package:rhino_viewer/core/services/settings_service.dart';
 import 'package:rhino_viewer/features/home/home_page.dart';
 
@@ -39,6 +40,7 @@ void main() {
       ),
       settings: SettingsService(store),
       intents: IntentService(),
+      errors: PlatformErrorMonitor(),
     );
     opened = [];
     nextPick = null;

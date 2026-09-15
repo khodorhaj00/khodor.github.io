@@ -672,6 +672,37 @@ void main() {
     await tester.tap(find.text('Diagnostics'));
     await tester.tap(find.text('Back'));
     expect([retry, diagnostics, back], [1, 1, 1]);
+    expect(
+      find.text('Other rendering mode'),
+      findsNothing,
+      reason: 'a page that loaded is not a compositing failure',
+    );
+  });
+
+  testWidgets('ViewerErrorPanel offers the other rendering mode when asked', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    var switched = 0;
+    await tester.pumpWidget(
+      host(
+        Stack(
+          children: [
+            ViewerErrorPanel(
+              message: 'The viewer never started.',
+              onRetry: () {},
+              onDiagnostics: () {},
+              onBack: () {},
+              onAlternateRendering: () => switched++,
+            ),
+          ],
+        ),
+      ),
+    );
+    await tester.tap(find.text('Other rendering mode'));
+    expect(switched, 1);
   });
 
   testWidgets('DiagnosticsSheet waits for the page, then copies in one tap', (

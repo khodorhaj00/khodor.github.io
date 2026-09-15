@@ -11,6 +11,7 @@ class AppSettings {
     this.apiKey = '',
     this.meshQuality = MeshQuality.standard,
     this.cacheCapMb = 1024,
+    this.hybridWebViewComposition = true,
   });
 
   factory AppSettings.fromJson(Map<String, dynamic> json) => AppSettings(
@@ -18,6 +19,9 @@ class AppSettings {
     apiKey: '${json['apiKey'] ?? ''}',
     meshQuality: MeshQuality.fromWire('${json['meshQuality'] ?? 'default'}'),
     cacheCapMb: json['cacheCapMb'] is int ? json['cacheCapMb'] as int : 1024,
+    hybridWebViewComposition: json['hybridWebViewComposition'] is bool
+        ? json['hybridWebViewComposition'] as bool
+        : true,
   );
 
   static const List<int> cacheCapChoicesMb = [256, 512, 1024, 2048, 4096];
@@ -26,6 +30,11 @@ class AppSettings {
   final String apiKey;
   final MeshQuality meshQuality;
   final int cacheCapMb;
+
+  /// How Android composites the viewer's WebView. True (the default) keeps the
+  /// real WebView in the Android view tree; false draws it into a Flutter
+  /// texture instead. See ARCHITECTURE.md 3.1.
+  final bool hybridWebViewComposition;
 
   bool get hasBackend => backendUrl.trim().isNotEmpty;
 
@@ -36,6 +45,7 @@ class AppSettings {
     'apiKey': apiKey,
     'meshQuality': meshQuality.wireName,
     'cacheCapMb': cacheCapMb,
+    'hybridWebViewComposition': hybridWebViewComposition,
   };
 
   AppSettings copyWith({
@@ -43,11 +53,14 @@ class AppSettings {
     String? apiKey,
     MeshQuality? meshQuality,
     int? cacheCapMb,
+    bool? hybridWebViewComposition,
   }) => AppSettings(
     backendUrl: backendUrl ?? this.backendUrl,
     apiKey: apiKey ?? this.apiKey,
     meshQuality: meshQuality ?? this.meshQuality,
     cacheCapMb: cacheCapMb ?? this.cacheCapMb,
+    hybridWebViewComposition:
+        hybridWebViewComposition ?? this.hybridWebViewComposition,
   );
 }
 

@@ -230,7 +230,7 @@ InAppWebView(
     useOnRenderProcessGone: true,
     supportZoom: false, overScrollMode: OverScrollMode.NEVER,
     verticalScrollBarEnabled: false, horizontalScrollBarEnabled: false,
-    useHybridComposition: true,
+    useHybridComposition: settings.hybridWebViewComposition,   // default true; see below
   ),
   initialUserScripts: [ /* AT_DOCUMENT_START: documentElement.style.backgroundColor = '#0E1013' */ ],
   onWebViewCreated: (c) { register handlers of §2.2 with c.addJavaScriptHandler(...) },
@@ -249,6 +249,28 @@ defaults, pinned so they cannot drift. The Android window is dark in every confi
 Never set `disableVerticalScroll` / `disableHorizontalScroll`: on Android the plugin implements them
 by swallowing every touch-move event before Chromium sees it, which kills orbit, pan and pinch-zoom;
 the page blocks scrolling itself (`viewer.css`: `overflow: hidden`, `touch-action: none`).
+
+**Composition mode** is the one WebView setting the user can change, because it is the one whose
+failure mode is a viewer that never appears at all. `useHybridComposition: true` (the default)
+routes to `PlatformViewsService.initExpensiveAndroidView` and keeps the real WebView in the Android
+view tree; `false` routes to `initSurfaceAndroidView`, which draws it into a Flutter texture — the
+path with the known WebGL artefacts, and the reason hybrid is the default. The two reach the engine
+through different native code with different requirements, so a device that cannot create the view
+one way may manage the other. The page reads
+`AppSettings.hybridWebViewComposition` **once, in `initState`**, so the mode can never change under
+a live WebView; *Other rendering mode* on the error panel flips it, persists it and recreates the
+view through `_retry()`. The button is offered only when the WebView never came up
+(`_bridge == null` and still at *Creating the view*) — every later failure is the page's or the
+file's, and compositing cannot change it. Settings › Viewer › *Hybrid rendering* is the same flag,
+for setting it back. The diagnostics dump names the mode in use (`Composite`); a report that does
+not say which path drew the WebView cannot be read.
+
+The manifest must never declare `io.flutter.embedding.android.EnableHcpp`. It turns on Hybrid
+Composition++, which is mutually exclusive with hybrid composition: `PlatformViewsChannel` silently
+reroutes a hybrid create request to the HCPP controller and `createForPlatformViewLayer` throws. It
+is off by default (`settings.h:239`) and there is no other way to enable it, so adding it would
+break every WebView in the app with no visible error. There is a comment to that effect in
+`AndroidManifest.xml`.
 
 Model URL passed to JS: `https://appassets.androidplatform.net/files/<fileName>` where
 `<fileName>` is a file inside `modelsDir`. Fallback if the URL fetch fails (`loadResult.error`
@@ -273,6 +295,113 @@ outgoing WebView are ignored so they cannot fail the new attempt.
 (`ViewerOverlay.resolve`: error > busy > progress), and the *none* case is only reachable with
 `stats != null`. A blank, grey or otherwise dead WebView can therefore never pass for a working
 app, whatever the cause.
+
+### 3.1a Errors nobody catches (`lib/core/services/platform_error_monitor.dart`)
+
+An Android platform view is created by a `Future` **nobody awaits**: flutter_inappwebview calls
+`AndroidViewController.create()` from `PlatformViewLink`'s `onCreatePlatformView` and drops the
+result, and the framework's own call site in `_PlatformViewLinkState.build` drops it too.
+`create()` awaits the native `create` method call and only then runs the
+`onPlatformViewCreated` listeners — the listeners that build the controller and fire
+`onWebViewCreated`. So when the Android side refuses (an unregistered view type because the
+plugin is not registered; an Android System WebView that is missing or disabled, so the `WebView`
+constructor throws and the method channel returns a `PlatformException`) **no InAppWebView
+callback fires, no `FlutterError` is reported, and nothing in Dart can catch it**: the rejected
+future becomes an unhandled asynchronous error in the root zone, which Flutter offers to
+`PlatformDispatcher.instance.onError` and otherwise only prints to logcat. That is the one failure
+the viewer could not explain — the app knew only that the view was never created.
+
+`PlatformErrorMonitor` closes it. `main()` constructs one as its **first** statement and calls
+`install()`; it is passed to the screens through `AppServices.errors`.
+
+* `PlatformDispatcher.instance.onError` → record, then **return `false`**, so the error stays
+  unhandled and Flutter logs it exactly as before. `FlutterError.onError` → record, then call the
+  handler that was there. The monitor observes; it never absorbs, and it never duplicates an error
+  the app already catches (a caught error never reaches either hook).
+* `install()` is called from `main()` and nowhere else. `flutter_test` installs its own
+  `FlutterError.onError` around every test, so a widget that installed the monitor would swallow
+  the failures of the test that built it. The hooks are `@visibleForTesting` methods so the
+  behaviour is tested without the globals.
+* `runZonedGuarded` is deliberately **not** used: it would move the same errors to the zone
+  handler and away from `PlatformDispatcher.onError`, and it requires every binding call and
+  `runApp` to sit in the one zone, for no extra coverage.
+
+The viewer page listens from `initState` — before its first build, so no platform-view failure can
+beat it. An uncaught error that is from the platform side (`PlatformException`,
+`MissingPluginException`) or names the platform-view machinery, arriving while the page is still
+at *Creating the view* with no controller, fails the page immediately with Android's own text
+instead of waiting out the 10 s watchdog. Anything else is recorded: at error level while no model
+is on screen (so it shows under the stage and in the watchdog's message), at warning level once
+the model is up, so a stray error elsewhere in the app cannot tear down a working viewer.
+
+**WebView provider probe** (`lib/core/services/webview_provider.dart`). `InAppWebViewController.
+getCurrentWebViewPackage()` is a *static* call on the plugin's manager channel
+(`WebViewCompat.getCurrentWebViewPackage`), so it needs neither a WebView nor a platform view and
+answers when the view was never built. The viewer runs it once per page and reports the answer in
+the overlay's problem line and the diagnostics `WebView` field:
+
+| Answer | Means | Page does |
+|---|---|---|
+| package + version | provider present, plugin registered | records it, nothing else |
+| `null` | Android has no enabled WebView implementation | error-level event; named in the watchdog message (the query itself can fail on older Android, so it is not fatal on its own) |
+| `MissingPluginException` | the plugin is not registered in this build, so its view factory is not either | fails the page at once — no retry in this process can fix it |
+
+The diagnostics report gains `WebView <provider>` in `STATE` and an `UNCAUGHT ERRORS` section
+listing every record the monitor kept, in full.
+
+### 3.1b Contingency: replacing flutter_inappwebview (NOT done, do not start without cause)
+
+If a build with minification off (§3.6b), both composition modes (§3.1) and the diagnostics of §3.1a
+still shows a WebView that is never created, the remaining suspect is the plugin itself:
+flutter_inappwebview 6.1.5 / flutter_inappwebview_android 1.1.3 were published in 2024 and predate
+Flutter 3.47. A source-level check found **no** incompatibility — every framework API the plugin
+calls still exists with the same signature, none is deprecated, and the `create` message it sends
+matches what the 3.47 engine reads — so this is a contingency, not a plan. Record what the phone
+says first; do not start on a hunch.
+
+The replacement is `webview_flutter` + `webview_flutter_android` (4.14.x), which resolves cleanly
+against this pubspec. Its structural advantage is the reason to consider it at all: the native
+`android.webkit.WebView` is created eagerly by the controller over Pigeon and the platform view only
+*looks it up*, so `loadRequest`, `runJavaScript`, `onPageStarted` and `onWebResourceError` all work
+independently of the platform view. The exact failure being chased — total Dart-side silence because
+the view never came up — is structurally impossible there.
+
+Concrete steps, in order:
+
+1. **Local HTTP server first, on the current plugin.** `webview_flutter_android` has no
+   `WebViewAssetLoader` binding and does not expose `shouldInterceptRequest`; its `loadFlutterAsset`
+   resolves to a `file://` origin, which kills the blob Web Worker, `fetch`, the import map and WASM
+   streaming that §2 depends on. So a `dart:io` `HttpServer` on `InternetAddress.loopbackIPv4` port 0
+   is not a workaround, it is the design: serve `/<token>/viewer/<path>` from `rootBundle` (asset
+   keys via `AssetManifest.loadFromAssetBundle`) and `/<token>/files/<name>` from `modelsDir`, with
+   the MIME table copied from `tool/viewer_test/run.mjs` (`.wasm` → `application/wasm`, `.js` →
+   `text/javascript; charset=utf-8`). Reject non-loopback peers, reject a `Host` that is not
+   `127.0.0.1:<port>`, and reject any name containing `/` or `..`; the random path token is part of
+   the design, because any app on the phone can reach loopback. This is unit-testable under
+   `flutter test` with a real `HttpClient`, and it retires the asset origin as a variable while the
+   old plugin is still in place. `http://127.0.0.1` is a potentially-trustworthy origin in Chromium
+   and is the same origin shape the CI harness already proves green.
+2. **Swap the widget and the runner.** Only two files import the plugin: `viewer_page.dart` and
+   `webview_js_runner.dart`. `ViewerBridge` sits behind `JsRunner` and does not change, nor does its
+   test. Build a `WebViewController` in `initState` and
+   `WebViewWidget.fromPlatformCreationParams(AndroidWebViewWidgetCreationParams(controller:,
+   displayWithHybridComposition:, gestureRecognizers:))` so the §3.1 mode toggle survives the swap.
+3. **Bridge shim, no page change.** `index.html` reads `window.flutter_inappwebview` at call time and
+   queues to `window.__viewerEvents` otherwise, so injecting at `onPageStarted` a
+   `flutter_inappwebview.callHandler` that forwards `JSON.stringify({name, payload})` to one
+   `addJavaScriptChannel` and then drains `__viewerEvents` is lossless. `runJavaScriptReturningResult`
+   returns the raw JSON string where `evaluateJavascript` returned a decoded value, so the adapter
+   must `jsonDecode` — contain that in `webview_js_runner.dart` and nothing else moves.
+4. **Accept the losses, in writing.** `webview_flutter_android` has **no `onRenderProcessGone`**, and
+   Android's default for an unhandled dead renderer is to kill the app process: a 5.6 MB model that
+   OOMs the renderer would take the app down instead of offering *Retry*, which is a real regression
+   against §3.1. `forceDark`, `algorithmicDarkeningAllowed` and `safeBrowsingEnabled` are not exposed
+   and can no longer be pinned. `WebResourceRequest` carries only `uri`, so main-frame detection for
+   HTTP errors becomes a URL comparison.
+
+Dropping the plugin would also remove the stated reason for the AGP 8.x pin in §3.6a. Do **not**
+move to flutter_inappwebview `1.2.0-beta` instead: it rewrites 75 files of the component the whole
+app runs on.
 
 ### 3.2 Storage & cache
 
@@ -335,7 +464,9 @@ Kotlin rejects anything whose bytes do not start with the `.3dm` magic (toast + 
 * **Settings**: backend URL, API key (obscured), mesh quality (`draft/default/fine`), cache size
   cap, "Clear cache", "Test connection" (`GET /health`; green when Compute is reachable, amber
   when the appserver answers but Compute is not configured or unreachable — `/mesh` fails in
-  that state — red with the error code otherwise), about (versions of three/rhino3dm).
+  that state — red with the error code otherwise), *Hybrid rendering* (the composition mode of
+  §3.1; on by default, and the only reason to turn it off is a viewer that never appears), about
+  (versions of three/rhino3dm).
 
 Visual language (user preference): dark, industrial, no decoration. Tokens: bg `#0E1013`,
 surface `#161A1F`, border `#262B33`, text `#E6E8EB`, muted `#8B93A1`, accent `#FFB020`,
@@ -356,6 +487,8 @@ lib/core/services/cache_service.dart    recents + LRU + size cap (takes a Direct
 lib/core/services/backend_client.dart   health/mesh/convert over an injectable http.Client
 lib/core/services/settings_service.dart
 lib/core/services/intent_service.dart   MethodChannel wrapper
+lib/core/services/platform_error_monitor.dart  the uncaught-error hooks of 3.1a - pure Dart, unit tested
+lib/core/services/webview_provider.dart        one-shot "which WebView does Android have?" probe
 lib/features/home/home_page.dart
 lib/features/viewer/viewer_page.dart (+ widgets/: toolbar, layers_sheet, stats_sheet, picked_card, unmeshed_banner, meshing_banner, loading_overlay, error_panel, diagnostics_sheet)
 lib/features/viewer/viewer_status.dart  stages, watchdog, event log, overlay invariant — pure Dart, unit tested
@@ -364,8 +497,9 @@ lib/features/settings/settings_page.dart
 lib/app/format.dart                counts, bytes, lengths, unit symbols, relative dates (no intl)
 test/                             unit tests for models, viewer events, format, file_service and
                                   cache_service (temp dir), backend_client (http MockClient),
-                                  intent_service, viewer_bridge (fake JsRunner); widget tests for
-                                  HomePage, SettingsPage and the viewer widgets.
+                                  intent_service, viewer_bridge (fake JsRunner),
+                                  platform_error_monitor; widget tests for HomePage, SettingsPage
+                                  and the viewer widgets.
 ```
 
 ### 3.6a Android build toolchain (pinned)
@@ -383,14 +517,54 @@ satisfy Flutter and keep the stable plugin. `android.newDsl` is removed from `gr
 because it only exists in AGP 9. Do not bump AGP back to 9 until `flutter_inappwebview` ships a
 stable release with the fix; the build breaks immediately if you do.
 
+### 3.6b Minification is OFF for release, on purpose
+
+`buildTypes.release` sets `isMinifyEnabled = false` and `isShrinkResources = false`, and **those two
+lines are what turns R8 off** — they are not the Flutter default restated. Flutter enables both by
+itself: `FlutterPlugin.apply()` assigns `isMinifyEnabled = true` / `isShrinkResources = true` to the
+`release` build type and appends `proguard-android-optimize.txt`, its own `flutter_proguard_rules.pro`
+and the module's `proguard-rules.pro`, guarded only by `FlutterPluginUtils.shouldShrinkResources()`,
+which returns `true` unless the `-Pshrink` Gradle property is set
+(`FlutterPlugin.kt:216-228`, `FlutterPluginUtils.kt:226-233`, Flutter 3.47.4). The `--shrink` CLI
+flag is documented as having no effect (`flutter_command.dart:986-990`) and CI passes a plain
+`flutter build apk --release`. Because the `plugins {}` block applies `FlutterPlugin` before the
+script body runs, the app's assignments come last and win.
+
+Why off: the viewer failed on the user's device before `onWebViewCreated` ever fired — the Android
+platform view was never constructed, and nothing surfaced in Dart (§3.1a explains why nothing could).
+Every release APK this project has produced was minified, so R8 was the only variable on that path
+never observed switched off. Shipping an app that cannot be opened is a worse trade than shipping a
+larger one. Multidex is not a concern: `minSdk = 24`, where Android loads multiple DEX files
+natively.
+
+**Do not use `-Pshrink=false` to test this.** It makes Flutter skip its whole block, so R8 would run
+with none of those rule files — strictly more broken than the minified build, and a misleading
+result. The only correct switch is the two `false`s in `build.gradle.kts`.
+
+Before turning minification back on, all three must hold:
+
+1. the phone renders a model from a minified build;
+2. `build/app/outputs/mapping/release/mapping.txt` still contains `InAppWebViewFlutterPlugin` and
+   `FlutterWebViewFactory`, unrenamed;
+3. `-printconfiguration` shows that the plugin's own consumer rule
+   (`-keep class com.pichillilorenzo.flutter_inappwebview_android.** { *; }`, declared via
+   `consumerProguardFiles` in `flutter_inappwebview_android` 1.1.3's `android/build.gradle:36`)
+   actually reached R8.
+
+`android/app/proguard-rules.pro` already holds the keeps that day needs — the plugin package, plus
+`*JavascriptInterface*` and the `@android.webkit.JavascriptInterface` members the page calls by name.
+It is inert while minification is off, and `FlutterPlugin.kt:224-227` picks it up with no wiring once
+minification returns. The registration path is worth keeping in mind either way:
+`GeneratedPluginRegistrant.registerWith` wraps every `getPlugins().add(...)` in
+`catch (Exception e) { Log.e(...) }`, so anything thrown while a plugin registers its view factory
+becomes one logcat line and the app continues with the view type unregistered.
+
 ### 3.6 Signing (`android/app/build.gradle.kts`)
 
 Read `android/key.properties` if present (`storeFile`, `storePassword`, `keyAlias`,
 `keyPassword`) → `signingConfigs.create("release")` and use it for `buildTypes.release`;
 otherwise fall back to the debug signing config and print a Gradle `logger.warn`. Add
 `android/key.properties`, `android/app/*.jks`, `android/app/*.keystore` to `app/.gitignore`.
-Release: `isMinifyEnabled = true`, `isShrinkResources = true`, ProGuard rules file keeping
-`com.pichillilorenzo.flutter_inappwebview_android.**` (flutter_inappwebview) if needed.
 `android:label="Rhino Viewer"`, `android:usesCleartextTraffic` NOT enabled globally — the
 backend URL must be https, or the user enables `http` per-URL via a `network_security_config`
 that allows cleartext only for user-added domains? Simpler: allow cleartext (LAN Compute
