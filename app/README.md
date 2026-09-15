@@ -50,6 +50,9 @@ from repository secrets (see the root README).
 
 Settings → *Backend URL* (+ optional API key). The manifest enables cleartext HTTP because
 workshop Compute servers usually live on the LAN without TLS; use `https://` where possible.
+*Mesh on server* uploads in the background of the viewer with upload progress and a Cancel
+button (the HTTP request is aborted); *Test connection* warns in amber when the appserver is
+up but Rhino.Compute is missing or unreachable, since `/mesh` fails in that state.
 
 ## Layout
 
@@ -61,5 +64,6 @@ lib/core/bridge/viewer_bridge.dart  window.viewer calls + callHandler events (Js
 lib/core/services/                  files, cache/recents, backend client, settings, intents
 lib/features/{home,viewer,settings} screens; viewer/widgets holds toolbar, sheets, overlays
 assets/viewer/                      the three.js page (see ../docs/ARCHITECTURE.md §2)
-test/                               unit tests (models, services, bridge) + HomePage widget test
+test/                               unit tests (models, services, bridge, formatting) + widget tests
+                                    (home, settings, viewer widgets)
 ```

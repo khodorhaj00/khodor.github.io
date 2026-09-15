@@ -124,17 +124,58 @@ void main() {
     expect(opened, hasLength(1));
   });
 
-  testWidgets('swipe deletes the entry and its file', (tester) async {
+  testWidgets('swipe hides the entry; the file goes once Undo expires', (
+    tester,
+  ) async {
     await tester.runAsync(() => seedRecent('ccc', 'gone.3dm'));
     await tester.pumpWidget(app());
     await tester.pumpAndSettle();
     await tester.drag(find.text('gone.3dm'), const Offset(-600, 0));
     await tester.pumpAndSettle();
     expect(find.text('gone.3dm'), findsNothing);
+    expect(find.text('Removed gone.3dm'), findsOneWidget);
+    expect(find.text('Undo'), findsOneWidget);
+    expect(find.text('No recent files'), findsOneWidget);
+    expect(
+      File('${services.modelsDir.path}/ccc.3dm').existsSync(),
+      isTrue,
+      reason: 'nothing is deleted while Undo is still offered',
+    );
+    expect(store.data[CacheService.recentsKey], contains('ccc'));
+
+    // Let the SnackBar time out.
+    await tester.pump(const Duration(seconds: 6));
+    await tester.pumpAndSettle();
+    expect(find.text('Undo'), findsNothing);
     await settle(tester, () => store.data[CacheService.recentsKey] == '[]');
     await tester.pumpAndSettle();
     expect(find.text('No recent files'), findsOneWidget);
     expect(File('${services.modelsDir.path}/ccc.3dm').existsSync(), isFalse);
+  });
+
+  testWidgets('Undo after a swipe restores the entry and keeps the file', (
+    tester,
+  ) async {
+    await tester.runAsync(() => seedRecent('fff', 'kept.3dm'));
+    await tester.pumpWidget(app());
+    await tester.pumpAndSettle();
+    await tester.drag(find.text('kept.3dm'), const Offset(-600, 0));
+    await tester.pumpAndSettle();
+    expect(find.text('kept.3dm'), findsNothing);
+
+    await tester.tap(find.text('Undo'));
+    await tester.pumpAndSettle();
+    expect(find.text('kept.3dm'), findsOneWidget);
+    expect(find.text('No recent files'), findsNothing);
+    await tester.pump(const Duration(seconds: 6));
+    await tester.pumpAndSettle();
+    expect(File('${services.modelsDir.path}/fff.3dm').existsSync(), isTrue);
+    expect(store.data[CacheService.recentsKey], contains('fff'));
+
+    await tester.tap(find.text('kept.3dm'));
+    await settle(tester, () => opened.isNotEmpty);
+    await tester.pumpAndSettle();
+    expect(opened.single.sha, 'fff');
   });
 
   testWidgets('a stale recent whose file vanished is removed with a message', (

@@ -30,6 +30,43 @@ String formatLength(double value) {
   return text.contains('.') ? text.replaceFirst(RegExp(r'\.?0+$'), '') : text;
 }
 
+const Map<String, String> _unitSymbols = {
+  'angstroms': 'Å',
+  'nanometers': 'nm',
+  'microns': 'µm',
+  'millimeters': 'mm',
+  'centimeters': 'cm',
+  'decimeters': 'dm',
+  'meters': 'm',
+  'dekameters': 'dam',
+  'hectometers': 'hm',
+  'kilometers': 'km',
+  'megameters': 'Mm',
+  'gigameters': 'Gm',
+  'microinches': 'µin',
+  'mils': 'mil',
+  'inches': 'in',
+  'feet': 'ft',
+  'yards': 'yd',
+  'miles': 'mi',
+  'nauticalmiles': 'nmi',
+};
+
+/// Short symbol for a rhino3dm `UnitSystem` name as the viewer reports it
+/// (`Millimeters` → `mm`, `Inches` → `in`); a `UnitSystem_` prefix is
+/// tolerated. Empty for `None`, `Unknown`, custom and unrecognised units, so
+/// callers print bare numbers instead of "100 Unknown".
+String unitSymbol(String rhinoName) {
+  final key = rhinoName.trim().toLowerCase().replaceFirst('unitsystem_', '');
+  return _unitSymbols[key] ?? '';
+}
+
+/// `<value> <symbol>`, or just the value when the unit has no symbol.
+String withUnit(String value, String rhinoName) {
+  final symbol = unitSymbol(rhinoName);
+  return symbol.isEmpty ? value : '$value $symbol';
+}
+
 String formatMs(int ms) =>
     ms >= 1000 ? '${(ms / 1000).toStringAsFixed(2)} s' : '$ms ms';
 

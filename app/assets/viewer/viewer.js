@@ -6,6 +6,11 @@ import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 const RHINO3DM_VERSION = '8.32.2';
 const HIGHLIGHT_COLOR = 0xFFB020;
 const HIGHLIGHT_INTENSITY = 0.35;
+// Outline colour for objects too close to HIGHLIGHT_COLOR (8-bit RGB distance) for it to show.
+const HIGHLIGHT_ALT_COLOR = 0x3DA5FF;
+const HIGHLIGHT_MIN_CONTRAST = 100;
+// Fraction of the limiting viewport axis the fitted model's silhouette spans.
+const FIT_FILL = 0.8;
 const GHOSTED_OPACITY = 0.35;
 const EDGE_ANGLE_DEG = 30;
 const EDGE_BUILD_BUDGET_MS = 30;
@@ -187,7 +192,7 @@ function applyControlLimits(radius) {
 }
 
 function aspect() {
-  return window.innerWidth / Math.max(1, window.innerHeight);
+  return Math.max(1, window.innerWidth) / Math.max(1, window.innerHeight);
 }
 
 function setOrthoFrustum(halfHeight) {
@@ -239,6 +244,9 @@ window.addEventListener('resize', () => {
   persp.aspect = aspect();
   persp.updateProjectionMatrix();
   setOrthoFrustum(ortho.top);
+  // The new aspect limits the frustum by the other axis (a phone rotation), so re-frame
+  // rather than crop: the whole model stays in view at the price of the current zoom.
+  fit();
   requestRender();
 });
 
@@ -350,15 +358,19 @@ function applyModeToMaterial(material, mode) {
   material.needsUpdate = true;
 }
 
+function edgeGeometryFor(geometry) {
+  let edges = edgeGeometries.get(geometry);
+  if (!edges) {
+    edges = new THREE.EdgesGeometry(geometry, EDGE_ANGLE_DEG);
+    edgeGeometries.set(geometry, edges);
+  }
+  return edges;
+}
+
 function edgesFor(mesh) {
   let edges = mesh.children.find((child) => child.userData.viewerEdges);
   if (edges) return edges;
-  let geometry = edgeGeometries.get(mesh.geometry);
-  if (!geometry) {
-    geometry = new THREE.EdgesGeometry(mesh.geometry, EDGE_ANGLE_DEG);
-    edgeGeometries.set(mesh.geometry, geometry);
-  }
-  edges = new THREE.LineSegments(geometry, edgeMaterial);
+  edges = new THREE.LineSegments(edgeGeometryFor(mesh.geometry), edgeMaterial);
   edges.userData.viewerEdges = true;
   edges.raycast = () => {};
   mesh.add(edges);
@@ -459,7 +471,7 @@ function drawableBounds(visibleOnly) {
   const box = new THREE.Box3();
   model.updateMatrixWorld(true);
   const visit = (obj) => {
-    if (!obj.geometry || obj.userData.viewerEdges || obj.isSprite) return;
+    if (!obj.geometry || obj.userData.viewerEdges || obj.userData.viewerHighlight || obj.isSprite) return;
     if (!obj.geometry.boundingBox) obj.geometry.computeBoundingBox();
     if (obj.geometry.boundingBox.isEmpty()) return;
     _box.copy(obj.geometry.boundingBox).applyMatrix4(obj.matrixWorld);
@@ -494,20 +506,87 @@ function viewDirection() {
   return dir.normalize();
 }
 
-// Frames a sphere from the current view direction in both cameras, so switching
-// projection afterwards keeps the same framing.
-function frameSphere(center, radius) {
+// Calls fn(corner) for the eight corners of a box; bit 0/1/2 of the index selects max
+// over min on x/y/z.
+function boxCorners(box, fn) {
+  const corner = new THREE.Vector3();
+  for (let i = 0; i < 8; i++) {
+    fn(corner.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z));
+  }
+}
+
+// Calls fn(point) for every drawn vertex of the visible model, in world space.
+function forEachVisibleVertex(fn) {
+  const point = new THREE.Vector3();
+  model.updateMatrixWorld(true);
+  model.traverseVisible((obj) => {
+    if (!obj.geometry || obj.userData.viewerEdges || obj.userData.viewerHighlight || obj.isSprite) return;
+    const position = obj.geometry.getAttribute('position');
+    if (!position) return;
+    for (let i = 0; i < position.count; i++) fn(point.fromBufferAttribute(position, i).applyMatrix4(obj.matrixWorld));
+  });
+}
+
+// Frames a set of points (eachPoint(fn) visits them) from the current view direction, in
+// both cameras so switching projection afterwards keeps the framing. The target is
+// `center` shifted across the view so the points' silhouette is centred, and the
+// perspective distance and ortho half-height are the smallest that keep every point
+// inside FIT_FILL of the frustum: the drawn silhouette, not a bounding sphere, fills the
+// viewport.
+function framePoints(center, radius, eachPoint) {
   const dir = viewDirection();
-  const vfov = THREE.MathUtils.degToRad(persp.fov);
-  const hfov = 2 * Math.atan(Math.tan(vfov / 2) * aspect());
-  const dist = (radius / Math.sin(Math.min(vfov, hfov) / 2)) * 1.05;
+  // The basis the camera gets from lookAt() once it sits along `dir` (same handling of a
+  // direction parallel to `up`).
+  const basis = new THREE.Matrix4().lookAt(dir, new THREE.Vector3(), persp.up);
+  const right = new THREE.Vector3().setFromMatrixColumn(basis, 0);
+  const up = new THREE.Vector3().setFromMatrixColumn(basis, 1);
+  const tanV = Math.tan(THREE.MathUtils.degToRad(persp.fov) / 2) * FIT_FILL;
+  const tanH = tanV * aspect();
+  // A point is inside the frustum of a camera `dist` behind a target shifted by (cx, cy)
+  // when (x - cx) <= (dist - z) * tanH, i.e. dist * tanH >= (x + z * tanH) - cx, and
+  // likewise for the other three planes; per plane only the largest reach matters.
+  const reach = { right: -Infinity, left: -Infinity, top: -Infinity, bottom: -Infinity };
+  const min = new THREE.Vector2(Infinity, Infinity);
+  const max = new THREE.Vector2(-Infinity, -Infinity);
+  const v = new THREE.Vector3();
+  const xy = new THREE.Vector2();
+  eachPoint((point) => {
+    v.subVectors(point, center);
+    const x = v.dot(right);
+    const y = v.dot(up);
+    const z = v.dot(dir);
+    reach.right = Math.max(reach.right, x + z * tanH);
+    reach.left = Math.max(reach.left, -x + z * tanH);
+    reach.top = Math.max(reach.top, y + z * tanV);
+    reach.bottom = Math.max(reach.bottom, -y + z * tanV);
+    min.min(xy.set(x, y));
+    max.max(xy);
+  });
+  if (min.x === Infinity) {
+    reach.right = reach.left = reach.top = reach.bottom = 0;
+    min.set(0, 0);
+    max.set(0, 0);
+  }
+  // Balancing opposite planes centres the silhouette and minimises the distance; a
+  // degenerate (point-like) model still gets a usable, non-zero framing.
+  const cx = (reach.right - reach.left) / 2;
+  const cy = (reach.top - reach.bottom) / 2;
+  const dist = Math.max((reach.right + reach.left) / (2 * tanH), (reach.top + reach.bottom) / (2 * tanV), radius * 0.05);
+  const halfHeight = Math.max(
+    (max.y - cy) / FIT_FILL,
+    (cy - min.y) / FIT_FILL,
+    (max.x - cx) / (FIT_FILL * aspect()),
+    (cx - min.x) / (FIT_FILL * aspect()),
+    radius * 0.05,
+  );
+  const target = center.clone().addScaledVector(right, cx).addScaledVector(up, cy);
 
-  persp.position.copy(center).addScaledVector(dir, dist);
-  ortho.position.copy(center).addScaledVector(dir, dist);
+  persp.position.copy(target).addScaledVector(dir, dist);
+  ortho.position.copy(persp.position);
   ortho.zoom = 1;
-  setOrthoFrustum(aspect() >= 1 ? radius * 1.05 : (radius * 1.05) / aspect());
+  setOrthoFrustum(halfHeight);
 
-  controls.target.copy(center);
+  controls.target.copy(target);
   applyControlLimits(radius);
   controls.update();
   requestRender();
@@ -516,7 +595,8 @@ function frameSphere(center, radius) {
 function fit() {
   const box = drawableBounds(true);
   if (box.isEmpty()) return;
-  frameSphere(box.getCenter(new THREE.Vector3()), Math.max(box.getSize(new THREE.Vector3()).length() / 2, 1e-6));
+  const radius = Math.max(box.getSize(new THREE.Vector3()).length() / 2, 1e-6);
+  framePoints(box.getCenter(new THREE.Vector3()), radius, forEachVisibleVertex);
 }
 
 function setView(name) {
@@ -604,18 +684,65 @@ function pickAt(clientX, clientY) {
   setPicked(hit ? hit.object : null);
 }
 
+function colorDistance(a, b) {
+  return Math.hypot((a >> 16) - (b >> 16), ((a >> 8) & 255) - ((b >> 8) & 255), (a & 255) - (b & 255));
+}
+
+function boxOutlineGeometry(box) {
+  const positions = [];
+  boxCorners(box, (corner) => positions.push(corner.x, corner.y, corner.z));
+  const geometry = new THREE.BufferGeometry();
+  geometry.setIndex([0, 1, 1, 3, 3, 2, 2, 0, 4, 5, 5, 7, 7, 6, 6, 4, 0, 4, 1, 5, 2, 6, 3, 7]);
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  return geometry;
+}
+
+// The picked object's outline, drawn through everything: its hard edges (the geometry is
+// shared with shaded_edges mode) or, for a smooth closed mesh that has none or a mesh too
+// large to edge, its own bounding box. The emissive tint alone vanishes on light colours,
+// and an accent-coloured line on an accent-coloured object, so such objects get the
+// alternative colour.
+function highlightOutline(mesh) {
+  const edges = meshTriangles(mesh) <= EDGE_MAX_TRIANGLES ? edgeGeometryFor(mesh.geometry) : null;
+  const shared = Boolean(edges && edges.getAttribute('position').count > 0);
+  if (!shared && !mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+  const hex = mesh.material.color.getHex();
+  const outline = new THREE.LineSegments(
+    shared ? edges : boxOutlineGeometry(mesh.geometry.boundingBox),
+    new THREE.LineBasicMaterial({
+      color: colorDistance(hex, HIGHLIGHT_COLOR) < HIGHLIGHT_MIN_CONTRAST ? HIGHLIGHT_ALT_COLOR : HIGHLIGHT_COLOR,
+      depthTest: false,
+      depthWrite: false,
+    }),
+  );
+  outline.renderOrder = 1;
+  outline.userData.viewerHighlight = true;
+  outline.userData.ownsGeometry = !shared;
+  outline.raycast = () => {};
+  return outline;
+}
+
+function unpick() {
+  if (!picked) return;
+  const { mesh, baseMaterial, outline } = picked;
+  mesh.material.dispose();
+  mesh.material = baseMaterial;
+  mesh.remove(outline);
+  outline.material.dispose();
+  if (outline.userData.ownsGeometry) outline.geometry.dispose();
+  picked = null;
+}
+
 function setPicked(mesh) {
-  if (picked) {
-    picked.mesh.material.dispose();
-    picked.mesh.material = picked.baseMaterial;
-    picked = null;
-  }
+  unpick();
   if (mesh) {
     const highlight = mesh.material.clone();
     highlight.emissive.setHex(HIGHLIGHT_COLOR);
     highlight.emissiveIntensity = HIGHLIGHT_INTENSITY;
-    picked = { mesh, baseMaterial: mesh.material };
+    const outline = highlightOutline(mesh);
+    picked = { mesh, baseMaterial: mesh.material, outline };
     mesh.material = highlight;
+    mesh.add(outline);
   }
   requestRender();
   emit('objectPicked', mesh ? describeObject(mesh) : null);
@@ -900,11 +1027,7 @@ function disposeObject(root) {
 }
 
 function clear() {
-  if (picked) {
-    picked.mesh.material.dispose();
-    picked.mesh.material = picked.baseMaterial;
-    picked = null;
-  }
+  unpick();
   if (modelRoot) {
     model.remove(modelRoot);
     disposeObject(modelRoot);
@@ -972,7 +1095,7 @@ async function exportGlb() {
   }
   copy.traverse((obj) => {
     for (const child of [...obj.children]) {
-      if (child.userData.viewerEdges) obj.remove(child);
+      if (child.userData.viewerEdges || child.userData.viewerHighlight) obj.remove(child);
     }
   });
   copy.traverse((obj) => {
@@ -1054,7 +1177,8 @@ window.viewer = Object.freeze({
 // ---------------------------------------------------------------------------------------
 
 createControls();
-frameSphere(new THREE.Vector3(), modelRadius);
+const unitBox = new THREE.Box3(new THREE.Vector3(-1, -1, -1), new THREE.Vector3(1, 1, 1));
+framePoints(new THREE.Vector3(), modelRadius, (fn) => boxCorners(unitBox, fn));
 const workerReady = loader._initLibrary()
   .then(() => loader._getWorker(0))
   .then((worker) => worker._ready);

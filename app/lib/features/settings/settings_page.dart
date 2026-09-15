@@ -27,6 +27,7 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _showKey = false;
   bool _testing = false;
   String? _testResult;
+  _Tone _testTone = _Tone.error;
   int? _diskUsage;
 
   AppSettings get _settings => widget.services.settings.value;
@@ -56,10 +57,16 @@ class _SettingsPageState extends State<SettingsPage> {
     if (mounted) setState(() {});
   }
 
+  // The only question the result answers is "will Mesh on server work?":
+  // a reachable appserver without Rhino.Compute cannot mesh anything, so
+  // that state is a warning, not a green OK.
   Future<void> _testConnection() async {
     final url = _url.text.trim();
     if (url.isEmpty) {
-      setState(() => _testResult = 'Enter a server URL first');
+      setState(() {
+        _testResult = 'Enter a server URL first';
+        _testTone = _Tone.error;
+      });
       return;
     }
     setState(() {
@@ -71,18 +78,26 @@ class _SettingsPageState extends State<SettingsPage> {
         url,
         apiKey: _apiKey.text.trim(),
       );
-      final compute = !health.computeConfigured
-          ? 'Compute not configured'
-          : health.computeReachable == true
-          ? 'Compute reachable'
-          : 'Compute unreachable';
-      _testResult = health.ok
-          ? 'OK · v${health.version} · $compute'
-          : 'Server reports not ok';
+      if (!health.ok) {
+        _testResult = 'Server reports not ok';
+        _testTone = _Tone.error;
+      } else if (!health.computeConfigured) {
+        _testResult =
+            'OK · v${health.version} · Compute not configured — Mesh on server will fail';
+        _testTone = _Tone.warning;
+      } else if (health.computeReachable != true) {
+        _testResult =
+            'OK · v${health.version} · Compute unreachable — Mesh on server will fail';
+        _testTone = _Tone.warning;
+      } else {
+        _testResult = 'OK · v${health.version} · Compute reachable';
+        _testTone = _Tone.ok;
+      }
     } catch (e) {
       // BackendException covers the classified failures; anything else must
       // still produce a visible result instead of a silently reset button.
       _testResult = 'Failed: $e';
+      _testTone = _Tone.error;
     } finally {
       if (mounted) setState(() => _testing = false);
     }
@@ -175,6 +190,12 @@ class _SettingsPageState extends State<SettingsPage> {
             ],
             selected: {settings.meshQuality},
             showSelectedIcon: false,
+            // Three segments share 328 dp on a 360 dp phone; the M3 default
+            // padding leaves too little for the labels at large font scales.
+            style: SegmentedButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: kGap),
+            ),
             onSelectionChanged: (sel) =>
                 _save((s) => s.copyWith(meshQuality: sel.first)),
           ),
@@ -189,29 +210,30 @@ class _SettingsPageState extends State<SettingsPage> {
               Expanded(
                 child: Text(
                   _testResult ?? '',
-                  style: TextStyle(
-                    color: (_testResult ?? '').startsWith('OK')
-                        ? AppColors.text
-                        : AppColors.danger,
-                    fontSize: 12,
-                  ),
+                  style: TextStyle(color: _testTone.color, fontSize: 12),
                 ),
               ),
             ],
           ),
           const _Section('Cache'),
           const _Label('Size cap'),
-          SegmentedButton<int>(
-            segments: [
+          // Five choices do not fit as segments on a 360 dp phone without
+          // wrapping their labels; a menu shows the current value in full.
+          DropdownMenu<int>(
+            initialSelection: settings.cacheCapMb,
+            requestFocusOnTap: false,
+            expandedInsets: EdgeInsets.zero,
+            textStyle: monoNumbers.copyWith(
+              color: AppColors.text,
+              fontSize: 14,
+            ),
+            dropdownMenuEntries: [
               for (final mb in AppSettings.cacheCapChoicesMb)
-                ButtonSegment(
-                  value: mb,
-                  label: Text(mb >= 1024 ? '${mb ~/ 1024} GB' : '$mb MB'),
-                ),
+                DropdownMenuEntry(value: mb, label: cacheCapLabel(mb)),
             ],
-            selected: {settings.cacheCapMb},
-            showSelectedIcon: false,
-            onSelectionChanged: (s) => _setCacheCap(s.first),
+            onSelected: (mb) {
+              if (mb != null) _setCacheCap(mb);
+            },
           ),
           const SizedBox(height: kGap * 1.5),
           Row(
@@ -221,11 +243,13 @@ class _SettingsPageState extends State<SettingsPage> {
                 child: const Text('Clear cache'),
               ),
               const SizedBox(width: kGap * 1.5),
-              Text(
-                usage == null ? '' : '${formatBytes(usage)} used',
-                style: monoNumbers.copyWith(
-                  color: AppColors.muted,
-                  fontSize: 12,
+              Expanded(
+                child: Text(
+                  usage == null ? '' : '${formatBytes(usage)} used',
+                  style: monoNumbers.copyWith(
+                    color: AppColors.muted,
+                    fontSize: 12,
+                  ),
                 ),
               ),
             ],
@@ -243,6 +267,19 @@ class _SettingsPageState extends State<SettingsPage> {
       ),
     );
   }
+}
+
+/// `256 MB` … `4 GB`, as shown in the size-cap menu.
+String cacheCapLabel(int mb) => mb >= 1024 ? '${mb ~/ 1024} GB' : '$mb MB';
+
+enum _Tone {
+  ok(AppColors.text),
+  warning(AppColors.accent),
+  error(AppColors.danger);
+
+  const _Tone(this.color);
+
+  final Color color;
 }
 
 class _Section extends StatelessWidget {

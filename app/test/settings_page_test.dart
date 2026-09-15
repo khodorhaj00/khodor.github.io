@@ -164,6 +164,79 @@ void main() {
     },
   );
 
+  testWidgets('Test connection warns when Compute cannot mesh', (tester) async {
+    await services.settings.update(
+      const AppSettings(backendUrl: 'http://srv:8080'),
+    );
+    Color colorOf(Finder finder) => tester.widget<Text>(finder).style!.color!;
+    http.Response health(bool configured, bool? reachable) => http.Response(
+      jsonEncode({
+        'ok': true,
+        'version': '2.0.0',
+        'uptimeSec': 5,
+        'compute': {
+          'url': 'http://win:5000/',
+          'configured': configured,
+          'reachable': reachable,
+        },
+      }),
+      200,
+    );
+
+    respond = (_) => health(true, false);
+    await pumpPage(tester);
+    await tester.tap(find.text('Test connection'));
+    await tester.pumpAndSettle();
+    final unreachable = find.text(
+      'OK · v2.0.0 · Compute unreachable — Mesh on server will fail',
+    );
+    expect(unreachable, findsOneWidget);
+    expect(colorOf(unreachable), AppColors.accent);
+
+    respond = (_) => health(false, null);
+    await tester.tap(find.text('Test connection'));
+    await tester.pumpAndSettle();
+    final unconfigured = find.text(
+      'OK · v2.0.0 · Compute not configured — Mesh on server will fail',
+    );
+    expect(unconfigured, findsOneWidget);
+    expect(colorOf(unconfigured), AppColors.accent);
+
+    respond = (_) => health(true, true);
+    await tester.tap(find.text('Test connection'));
+    await tester.pumpAndSettle();
+    final ok = find.text('OK · v2.0.0 · Compute reachable');
+    expect(ok, findsOneWidget);
+    expect(colorOf(ok), AppColors.text);
+
+    respond = (_) => http.Response(jsonEncode({'ok': false}), 200);
+    await tester.tap(find.text('Test connection'));
+    await tester.pumpAndSettle();
+    final notOk = find.text('Server reports not ok');
+    expect(notOk, findsOneWidget);
+    expect(colorOf(notOk), AppColors.danger);
+  });
+
+  testWidgets('lays out on a 360 dp phone at 1.3x font scale', (tester) async {
+    tester.view.physicalSize = const Size(360, 640);
+    tester.view.devicePixelRatio = 1;
+    tester.platformDispatcher.textScaleFactorTestValue = 1.3;
+    addTearDown(tester.view.reset);
+    addTearDown(tester.platformDispatcher.clearAllTestValues);
+    await pumpPage(tester);
+    // An overflowing Row/Column would have been reported as a test error.
+    final cap = tester.getSize(find.text('1 GB'));
+    final oneLine = tester.getSize(find.text('Fine')).height;
+    expect(cap.height, closeTo(oneLine, 1), reason: 'cap label on one line');
+    expect(tester.getSize(find.byType(DropdownMenu<int>)).width, 360 - 32);
+    expect(find.byType(SegmentedButton<MeshQuality>), findsOneWidget);
+    expect(
+      find.byType(SegmentedButton<int>),
+      findsNothing,
+      reason: 'the five cache caps no longer compete for 328 dp',
+    );
+  });
+
   testWidgets('Test connection without a URL asks for one', (tester) async {
     await pumpPage(tester);
     await tester.tap(find.text('Test connection'));
@@ -184,10 +257,14 @@ void main() {
     await pumpPage(tester);
     expect(find.text('2.0 KB used'), findsOneWidget);
 
-    await tester.tap(find.text('256 MB'));
+    expect(find.text('1 GB'), findsOneWidget, reason: 'default cap shown');
+    await tester.tap(find.byType(DropdownMenu<int>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('256 MB').last);
     await settle(tester, () => services.settings.value.cacheCapMb == 256);
     await tester.pumpAndSettle();
     expect(services.cache.sizeCapBytes, 256 * 1024 * 1024);
+    expect(find.text('256 MB'), findsOneWidget);
 
     await tester.tap(find.text('Clear cache'));
     await tester.pumpAndSettle();

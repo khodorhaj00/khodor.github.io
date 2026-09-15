@@ -29,6 +29,14 @@ class _HomePageState extends State<HomePage> {
   bool _loaded = false;
   bool _busy = false;
 
+  /// How long a swiped-away entry can be brought back before its cached
+  /// file is deleted.
+  static const Duration undoWindow = Duration(seconds: 5);
+
+  /// Entries swiped away whose Undo SnackBar is still up: hidden from the
+  /// list, but still in the cache until the SnackBar closes without Undo.
+  final Set<String> _pendingRemoval = {};
+
   @override
   void initState() {
     super.initState();
@@ -50,6 +58,11 @@ class _HomePageState extends State<HomePage> {
       _loaded = true;
     });
   }
+
+  List<RecentFile> get _visibleRecents => [
+    for (final e in _recents)
+      if (!_pendingRemoval.contains(e.sha)) e,
+  ];
 
   Future<void> _pick() async {
     if (_busy) return;
@@ -96,15 +109,30 @@ class _HomePageState extends State<HomePage> {
   }
 
   // Dismissible requires its row to leave the tree as soon as it is
-  // dismissed, so the list is updated before the files are deleted.
+  // dismissed, so the entry is hidden first; the cached file (which may be
+  // the only copy the user has) is deleted only once Undo has expired.
   Future<void> _delete(RecentFile entry) async {
-    setState(() {
-      _recents = [
-        for (final e in _recents)
-          if (e.sha != entry.sha) e,
-      ];
-    });
+    setState(() => _pendingRemoval.add(entry.sha));
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    final reason = await messenger
+        .showSnackBar(
+          SnackBar(
+            content: Text('Removed ${entry.name}'),
+            action: SnackBarAction(label: 'Undo', onPressed: () {}),
+            // A SnackBar with an action persists by default; the deletion
+            // must commit on its own once the undo window has passed.
+            persist: false,
+            duration: undoWindow,
+          ),
+        )
+        .closed;
+    if (reason == SnackBarClosedReason.action) {
+      if (mounted) setState(() => _pendingRemoval.remove(entry.sha));
+      return;
+    }
     await widget.services.cache.remove(entry.sha);
+    if (mounted) setState(() => _pendingRemoval.remove(entry.sha));
   }
 
   void _snack(String message) {
@@ -116,6 +144,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
+    final recents = _visibleRecents;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Rhino Viewer'),
@@ -185,7 +214,7 @@ class _HomePageState extends State<HomePage> {
           Expanded(
             child: !_loaded
                 ? const SizedBox.shrink()
-                : _recents.isEmpty
+                : recents.isEmpty
                 ? const Center(
                     child: Text(
                       'No recent files',
@@ -193,12 +222,12 @@ class _HomePageState extends State<HomePage> {
                     ),
                   )
                 : ListView.separated(
-                    itemCount: _recents.length,
+                    itemCount: recents.length,
                     separatorBuilder: (_, _) => const Divider(),
                     itemBuilder: (_, i) => _RecentTile(
-                      entry: _recents[i],
-                      onTap: () => _openRecent(_recents[i]),
-                      onDelete: () => _delete(_recents[i]),
+                      entry: recents[i],
+                      onTap: () => _openRecent(recents[i]),
+                      onDelete: () => _delete(recents[i]),
                     ),
                   ),
           ),

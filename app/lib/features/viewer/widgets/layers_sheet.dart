@@ -6,7 +6,8 @@ import '../../../core/models/model_stats.dart';
 
 /// Bottom sheet listing layers with checkbox, colour swatch and object count.
 /// Keeps its own copy of the visibility flags so toggles render instantly;
-/// the page mirrors the changes through the callbacks.
+/// the page mirrors the changes through the callbacks. Draggable up to most
+/// of the screen and filterable, since production files carry 100+ layers.
 class LayersSheet extends StatefulWidget {
   const LayersSheet({
     super.key,
@@ -15,10 +16,18 @@ class LayersSheet extends StatefulWidget {
     required this.onAllToggled,
   });
 
+  /// Above this many layers the filter field is shown.
+  static const int filterThreshold = 12;
+
+  static const double initialSize = 0.5;
+  static const double maxSize = 0.9;
+
   final List<LayerInfo> layers;
   final void Function(int index, bool visible) onLayerToggled;
   final ValueChanged<bool> onAllToggled;
 
+  // The barrier is transparent so a toggle's effect on the model is visible
+  // while the sheet is open.
   static Future<void> show(
     BuildContext context, {
     required List<LayerInfo> layers,
@@ -27,6 +36,8 @@ class LayersSheet extends StatefulWidget {
   }) => showModalBottomSheet<void>(
     context: context,
     useSafeArea: true,
+    isScrollControlled: true,
+    barrierColor: Colors.transparent,
     builder: (_) => LayersSheet(
       layers: layers,
       onLayerToggled: onLayerToggled,
@@ -39,7 +50,30 @@ class LayersSheet extends StatefulWidget {
 }
 
 class _LayersSheetState extends State<LayersSheet> {
-  late List<LayerInfo> _layers = List.of(widget.layers);
+  late final List<LayerInfo> _layers = List.of(widget.layers);
+  final TextEditingController _filter = TextEditingController();
+
+  @override
+  void dispose() {
+    _filter.dispose();
+    super.dispose();
+  }
+
+  bool get _filterable => widget.layers.length > LayersSheet.filterThreshold;
+
+  String get _query => _filter.text.trim().toLowerCase();
+
+  /// Positions (into [_layers]) of the layers matching the filter.
+  List<int> get _shown {
+    final query = _query;
+    return [
+      for (var i = 0; i < _layers.length; i++)
+        if (query.isEmpty ||
+            _layers[i].name.toLowerCase().contains(query) ||
+            _layers[i].fullPath.toLowerCase().contains(query))
+          i,
+    ];
+  }
 
   void _toggle(int position, bool visible) {
     setState(
@@ -48,59 +82,111 @@ class _LayersSheetState extends State<LayersSheet> {
     widget.onLayerToggled(_layers[position].index, visible);
   }
 
+  /// All/None act on what is listed: every layer when there is no filter,
+  /// otherwise only the matches, each reported individually.
   void _all(bool visible) {
+    final targets = _shown;
     setState(() {
-      _layers = [for (final l in _layers) l.copyWith(visible: visible)];
+      for (final position in targets) {
+        _layers[position] = _layers[position].copyWith(visible: visible);
+      }
     });
-    widget.onAllToggled(visible);
+    if (_query.isEmpty) {
+      widget.onAllToggled(visible);
+      return;
+    }
+    for (final position in targets) {
+      widget.onLayerToggled(_layers[position].index, visible);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(kGap * 2, kGap, kGap, 0),
-          child: Row(
-            children: [
-              const Expanded(
-                child: Text(
-                  'Layers',
-                  style: TextStyle(
-                    color: AppColors.text,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              TextButton(onPressed: () => _all(true), child: const Text('All')),
-              TextButton(
-                onPressed: () => _all(false),
-                child: const Text('None'),
-              ),
-            ],
-          ),
-        ),
-        const Divider(),
-        Flexible(
-          child: _layers.isEmpty
-              ? const Padding(
-                  padding: EdgeInsets.all(kGap * 3),
+    final shown = _shown;
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: LayersSheet.initialSize,
+      maxChildSize: LayersSheet.maxSize,
+      builder: (context, controller) => Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(kGap * 2, kGap, kGap, 0),
+            child: Row(
+              children: [
+                Expanded(
                   child: Text(
-                    'No layers',
-                    style: TextStyle(color: AppColors.muted),
-                  ),
-                )
-              : ListView.builder(
-                  shrinkWrap: true,
-                  itemCount: _layers.length,
-                  itemBuilder: (_, i) => _LayerRow(
-                    layer: _layers[i],
-                    onChanged: (v) => _toggle(i, v),
+                    _query.isEmpty
+                        ? 'Layers'
+                        : 'Layers · ${formatCount(shown.length)} of ${formatCount(_layers.length)}',
+                    style: const TextStyle(
+                      color: AppColors.text,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
-        ),
-      ],
+                TextButton(
+                  onPressed: shown.isEmpty ? null : () => _all(true),
+                  child: const Text('All'),
+                ),
+                TextButton(
+                  onPressed: shown.isEmpty ? null : () => _all(false),
+                  child: const Text('None'),
+                ),
+              ],
+            ),
+          ),
+          if (_filterable)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                kGap * 2,
+                kGap / 2,
+                kGap * 2,
+                kGap,
+              ),
+              child: TextField(
+                controller: _filter,
+                onChanged: (_) => setState(() {}),
+                autocorrect: false,
+                textInputAction: TextInputAction.search,
+                style: const TextStyle(color: AppColors.text, fontSize: 14),
+                decoration: InputDecoration(
+                  isDense: true,
+                  hintText: 'Filter layers',
+                  prefixIcon: const Icon(Icons.search, size: 18),
+                  suffixIcon: _query.isEmpty
+                      ? null
+                      : IconButton(
+                          icon: const Icon(Icons.close, size: 18),
+                          tooltip: 'Clear filter',
+                          onPressed: () {
+                            _filter.clear();
+                            setState(() {});
+                          },
+                        ),
+                ),
+              ),
+            ),
+          const Divider(),
+          Expanded(
+            child: shown.isEmpty
+                ? Padding(
+                    padding: const EdgeInsets.all(kGap * 3),
+                    child: Text(
+                      _layers.isEmpty ? 'No layers' : 'No matching layers',
+                      style: const TextStyle(color: AppColors.muted),
+                    ),
+                  )
+                : ListView.builder(
+                    controller: controller,
+                    itemCount: shown.length,
+                    itemBuilder: (_, i) => _LayerRow(
+                      layer: _layers[shown[i]],
+                      onChanged: (v) => _toggle(shown[i], v),
+                    ),
+                  ),
+          ),
+        ],
+      ),
     );
   }
 }

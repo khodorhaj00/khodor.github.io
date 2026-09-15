@@ -6,6 +6,7 @@ import 'package:rhino_viewer/core/models/model_stats.dart';
 import 'package:rhino_viewer/core/models/viewer_events.dart';
 import 'package:rhino_viewer/features/viewer/widgets/layers_sheet.dart';
 import 'package:rhino_viewer/features/viewer/widgets/loading_overlay.dart';
+import 'package:rhino_viewer/features/viewer/widgets/meshing_banner.dart';
 import 'package:rhino_viewer/features/viewer/widgets/picked_card.dart';
 import 'package:rhino_viewer/features/viewer/widgets/stats_sheet.dart';
 import 'package:rhino_viewer/features/viewer/widgets/toolbar.dart';
@@ -90,6 +91,119 @@ void main() {
       expect(colorOf('Ortho'), AppColors.accent);
       expect(colorOf('Grid'), AppColors.text);
     });
+
+    testWidgets('Layers gets the layers glyph, Display a shading glyph', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        host(
+          ViewerToolbar(
+            displayMode: DisplayMode.shaded,
+            projection: Projection.perspective,
+            grid: true,
+            onFit: () {},
+            onView: (_) {},
+            onDisplayMode: (_) {},
+            onLayers: () {},
+            onGrid: (_) {},
+            onProjection: (_) {},
+          ),
+        ),
+      );
+      final layersCell = find.ancestor(
+        of: find.text('Layers'),
+        matching: find.byType(Column),
+      );
+      final displayCell = find.ancestor(
+        of: find.text('Display'),
+        matching: find.byType(Column),
+      );
+      expect(
+        find.descendant(
+          of: layersCell,
+          matching: find.byIcon(Icons.layers_outlined),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: displayCell, matching: find.byIcon(Icons.tonality)),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('floating SnackBars with the page margin clear the toolbar', (
+      tester,
+    ) async {
+      // Gesture-navigation phone: 34 px bottom inset.
+      tester.view.physicalSize = const Size(360, 640);
+      tester.view.devicePixelRatio = 1;
+      tester.view.padding = const FakeViewPadding(bottom: 34);
+      tester.view.viewPadding = const FakeViewPadding(bottom: 34);
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: buildAppTheme(),
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => Stack(
+                children: [
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: ColoredBox(
+                      color: AppColors.surface,
+                      child: SafeArea(
+                        top: false,
+                        child: ViewerToolbar(
+                          displayMode: DisplayMode.shaded,
+                          projection: Projection.perspective,
+                          grid: true,
+                          onFit: () {},
+                          onView: (_) {},
+                          onDisplayMode: (_) {},
+                          onLayers: () {},
+                          onGrid: (_) {},
+                          onProjection: (_) {},
+                        ),
+                      ),
+                    ),
+                  ),
+                  Center(
+                    child: TextButton(
+                      onPressed: () => ScaffoldMessenger.of(context)
+                          .showSnackBar(
+                            const SnackBar(
+                              content: Text('Meshed 12 objects in 3.20 s'),
+                              margin: kViewerSnackBarMargin,
+                            ),
+                          ),
+                      child: const Text('go'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('go'));
+      await tester.pumpAndSettle();
+      // The SnackBar widget's box includes its margin; the visible part is
+      // the Material inside it.
+      final snack = tester.getRect(
+        find
+            .descendant(
+              of: find.byType(SnackBar),
+              matching: find.byType(Material),
+            )
+            .first,
+      );
+      final toolbar = tester.getRect(find.byType(ViewerToolbar));
+      expect(toolbar.top, 640 - 34 - kViewerToolbarHeight);
+      expect(snack.bottom, lessThanOrEqualTo(toolbar.top));
+      expect(snack.top, greaterThan(toolbar.top - 120));
+    });
   });
 
   group('LayersSheet', () {
@@ -129,34 +243,227 @@ void main() {
         tester.widgetList<Checkbox>(find.byType(Checkbox)).map((c) => c.value),
         [false, false],
       );
+      expect(
+        find.byType(TextField),
+        findsNothing,
+        reason: 'a handful of layers needs no filter',
+      );
+    });
+
+    List<LayerInfo> manyLayers(int count) => [
+      for (var i = 0; i < count; i++)
+        LayerInfo(
+          index: i,
+          name: 'Layer $i',
+          fullPath: i.isEven ? 'Layer $i' : 'Group::Layer $i',
+          color: '#808080',
+          visible: true,
+          objectCount: i,
+        ),
+    ];
+
+    testWidgets('filters by name or path; All/None act on the matches', (
+      tester,
+    ) async {
+      final toggles = <(int, bool)>[];
+      var allCalls = 0;
+      await tester.pumpWidget(
+        host(
+          LayersSheet(
+            layers: manyLayers(150),
+            onLayerToggled: (i, v) => toggles.add((i, v)),
+            onAllToggled: (_) => allCalls++,
+          ),
+        ),
+      );
+      expect(find.byType(TextField), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField), 'layer 14');
+      await tester.pump();
+      expect(find.text('Layers · 11 of 150'), findsOneWidget);
+      expect(find.text('Layer 14'), findsOneWidget);
+      expect(find.text('Layer 15'), findsNothing);
+
+      await tester.tap(find.text('None'));
+      await tester.pump();
+      expect(allCalls, 0, reason: 'a filtered None must not hide everything');
+      expect(toggles.map((t) => t.$1).toSet(), {
+        14,
+        for (var i = 140; i < 150; i++) i,
+      });
+      expect(toggles.every((t) => t.$2 == false), isTrue);
+      expect(
+        tester.widget<Checkbox>(find.byType(Checkbox).first).value,
+        isFalse,
+      );
+
+      await tester.enterText(find.byType(TextField), 'group::layer 14');
+      await tester.pump();
+      expect(find.text('Layers · 5 of 150'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField), 'nothing');
+      await tester.pump();
+      expect(find.text('No matching layers'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('Clear filter'));
+      await tester.pump();
+      expect(find.text('Layers'), findsOneWidget);
+      toggles.clear();
+      await tester.tap(find.text('All'));
+      await tester.pump();
+      expect(allCalls, 1);
+      expect(toggles, isEmpty);
+      expect(
+        tester.widget<Checkbox>(find.byType(Checkbox).first).value,
+        isTrue,
+      );
+    });
+
+    testWidgets('the modal sheet can be dragged to most of the screen', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(360, 640);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        host(
+          Builder(
+            builder: (context) => TextButton(
+              onPressed: () => LayersSheet.show(
+                context,
+                layers: manyLayers(150),
+                onLayerToggled: (_, _) {},
+                onAllToggled: (_) {},
+              ),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      // The sheet's outermost Column starts at the sheet's top edge.
+      final body = find
+          .descendant(
+            of: find.byType(LayersSheet),
+            matching: find.byType(Column),
+          )
+          .first;
+      expect(
+        tester.getTopLeft(body).dy,
+        closeTo(640 * (1 - LayersSheet.initialSize), 4),
+      );
+      expect(find.byType(TextField), findsOneWidget);
+
+      await tester.drag(find.byType(ListView), const Offset(0, -400));
+      await tester.pumpAndSettle();
+      expect(
+        tester.getTopLeft(body).dy,
+        closeTo(640 * (1 - LayersSheet.maxSize), 4),
+      );
+      // A dimming barrier would be an AnimatedModalBarrier; a transparent
+      // one keeps the model visible while layers are toggled.
+      expect(find.byType(AnimatedModalBarrier), findsNothing);
     });
   });
 
-  testWidgets('PickedCard shows type, layer, size in units and user strings', (
-    tester,
-  ) async {
-    var closed = 0;
-    final picked = PickedObject.fromJson({
-      'id': '1',
-      'name': 'Bracket',
-      'objectType': 'Brep',
-      'layerIndex': 0,
-      'layerName': 'PARTS',
-      'userStrings': {'material': 'EPS'},
-      'size': [10, 20.5, 30],
-      'center': [0, 0, 0],
+  PickedObject pickedObject({Map<String, String> userStrings = const {}}) =>
+      PickedObject.fromJson({
+        'id': '1',
+        'name': 'Bracket',
+        'objectType': 'Brep',
+        'layerIndex': 0,
+        'layerName': 'PARTS',
+        'userStrings': userStrings,
+        'size': [10, 20.5, 30],
+        'center': [0, 0, 0],
+      });
+
+  group('PickedCard', () {
+    testWidgets('shows type, layer, size with a unit symbol and user strings', (
+      tester,
+    ) async {
+      var closed = 0;
+      await tester.pumpWidget(
+        host(
+          PickedCard(
+            object: pickedObject(userStrings: {'material': 'EPS'}),
+            units: 'Millimeters',
+            onClose: () => closed++,
+          ),
+        ),
+      );
+      expect(find.text('Bracket'), findsOneWidget);
+      expect(find.text('Brep'), findsOneWidget);
+      expect(find.text('PARTS'), findsOneWidget);
+      expect(find.text('10 × 20.5 × 30 mm'), findsOneWidget);
+      expect(find.text('material'), findsOneWidget);
+      expect(find.text('EPS'), findsOneWidget);
+      final close = tester.getSize(find.byType(IconButton));
+      expect(close.width, greaterThanOrEqualTo(44));
+      expect(close.height, greaterThanOrEqualTo(44));
+      await tester.tap(find.byIcon(Icons.close));
+      expect(closed, 1);
+
+      await tester.pumpWidget(
+        host(PickedCard(object: pickedObject(), units: 'None', onClose: () {})),
+      );
+      expect(find.text('10 × 20.5 × 30'), findsOneWidget);
     });
-    await tester.pumpWidget(
-      host(PickedCard(object: picked, units: 'mm', onClose: () => closed++)),
-    );
-    expect(find.text('Bracket'), findsOneWidget);
-    expect(find.text('Brep'), findsOneWidget);
-    expect(find.text('PARTS'), findsOneWidget);
-    expect(find.text('10 × 20.5 × 30 mm'), findsOneWidget);
-    expect(find.text('material'), findsOneWidget);
-    expect(find.text('EPS'), findsOneWidget);
-    await tester.tap(find.byIcon(Icons.close));
-    expect(closed, 1);
+
+    testWidgets('keeps the close button on screen and scrolls many strings', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(360, 640);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final strings = {for (var i = 0; i < 25; i++) 'key$i': 'value$i'};
+      await tester.pumpWidget(
+        host(
+          Stack(
+            children: [
+              Positioned(
+                left: kGap,
+                right: kGap * 8,
+                bottom: kViewerToolbarHeight + kGap,
+                child: PickedCard(
+                  object: pickedObject(userStrings: strings),
+                  units: 'Millimeters',
+                  onClose: () {},
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+      final card = tester.getRect(find.byType(PickedCard));
+      expect(
+        card.height,
+        lessThanOrEqualTo(640 * PickedCard.maxHeightFraction),
+      );
+      expect(card.top, greaterThanOrEqualTo(0));
+      final close = tester.getRect(find.byIcon(Icons.close));
+      expect(close.top, greaterThanOrEqualTo(card.top));
+      expect(
+        tester.getRect(find.text('value24')).top,
+        greaterThan(card.bottom),
+      );
+
+      await tester.drag(
+        find.byType(SingleChildScrollView),
+        const Offset(0, -2000),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.getRect(find.text('value24')).bottom,
+        lessThanOrEqualTo(card.bottom),
+      );
+      expect(
+        tester.getRect(find.byIcon(Icons.close)),
+        close,
+        reason: 'the header row is pinned',
+      );
+    });
   });
 
   testWidgets('UnmeshedBanner offers the server action matching the settings', (
@@ -226,11 +533,30 @@ void main() {
     expect(find.text('logo.3dm'), findsOneWidget);
     expect(find.text('48,210'), findsOneWidget);
     expect(find.text('Millimeters'), findsOneWidget);
-    expect(find.text('20 × 40 × 5.5 Millimeters'), findsOneWidget);
+    expect(find.text('20 × 40 × 5.5 mm'), findsOneWidget);
     expect(find.text('3 (2 Brep, 1 Extrusion)'), findsOneWidget);
     expect(find.text('r186'), findsOneWidget);
     expect(find.text('8.32.2'), findsOneWidget);
     expect(find.textContaining('no mesh: Brep abc'), findsOneWidget);
+  });
+
+  testWidgets('MeshingBanner shows the phase and offers Cancel', (
+    tester,
+  ) async {
+    var cancelled = 0;
+    await tester.pumpWidget(
+      host(
+        MeshingBanner(
+          status: 'Uploading 12.4 MB · 45 %',
+          onCancel: () => cancelled++,
+        ),
+      ),
+    );
+    expect(find.text('Meshing on server'), findsOneWidget);
+    expect(find.text('Uploading 12.4 MB · 45 %'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    expect(cancelled, 1);
   });
 
   testWidgets('LoadingOverlay shows the label and a progress bar', (

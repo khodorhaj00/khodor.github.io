@@ -5,6 +5,15 @@ import '../../../core/bridge/viewer_bridge.dart';
 
 const double kViewerToolbarHeight = 64;
 
+/// Margin for the page's floating SnackBars so they land above the toolbar
+/// (the Scaffold already keeps them above the system bottom inset).
+const EdgeInsets kViewerSnackBarMargin = EdgeInsets.fromLTRB(
+  kGap,
+  0,
+  kGap,
+  kViewerToolbarHeight + kGap,
+);
+
 /// Fit · Views · Display mode · Layers · Grid · Ortho (ARCHITECTURE.md §3.4).
 class ViewerToolbar extends StatelessWidget {
   const ViewerToolbar({
@@ -71,15 +80,12 @@ class ViewerToolbar extends StatelessWidget {
                 for (final mode in DisplayMode.values)
                   PopupMenuItem(value: mode, child: Text(mode.label)),
               ],
-              child: const _ToolButton(
-                icon: Icons.layers_outlined,
-                label: 'Display',
-              ),
+              child: const _ToolButton(icon: Icons.tonality, label: 'Display'),
             ),
           ),
           Expanded(
             child: _ToolButton(
-              icon: Icons.checklist_rtl,
+              icon: Icons.layers_outlined,
               label: 'Layers',
               onTap: onLayers,
             ),
@@ -141,7 +147,7 @@ class _ToolButton extends StatelessWidget {
         children: [
           Icon(icon, color: color, size: 22),
           const SizedBox(height: 2),
-          Text(label, style: TextStyle(color: color, fontSize: 10)),
+          Text(label, style: TextStyle(color: color, fontSize: 11)),
         ],
       ),
     );

@@ -22,12 +22,22 @@ import '../settings/settings_page.dart';
 import 'webview_js_runner.dart';
 import 'widgets/layers_sheet.dart';
 import 'widgets/loading_overlay.dart';
+import 'widgets/meshing_banner.dart';
 import 'widgets/picked_card.dart';
 import 'widgets/stats_sheet.dart';
 import 'widgets/toolbar.dart';
 import 'widgets/unmeshed_banner.dart';
 
 enum _MenuAction { exportGlb, shareOriginal, info }
+
+/// One `/mesh` round trip; mutated in place so the page can tell a status
+/// update for a stale job from one for the job on screen.
+class _MeshJob {
+  _MeshJob() : cancel = CancelToken();
+
+  final CancelToken cancel;
+  String status = 'Reading file…';
+}
 
 /// Full-screen WebView hosting the three.js viewer (ARCHITECTURE.md §3.1/§3.4).
 class ViewerPage extends StatefulWidget {
@@ -62,7 +72,12 @@ class _ViewerPageState extends State<ViewerPage> {
   late RecentFile _entry = widget.entry;
   ViewerReadyInfo? _ready;
   LoadProgress? _progress;
+
+  /// Set while GLB export runs; shown as the modal overlay.
   String? _busyLabel;
+
+  /// Set while `/mesh` is in flight; shown as a cancellable banner.
+  _MeshJob? _meshJob;
   ModelStats? _stats;
   String? _error;
   List<LayerInfo> _layers = const [];
@@ -87,6 +102,8 @@ class _ViewerPageState extends State<ViewerPage> {
   @override
   void dispose() {
     _readyTimer?.cancel();
+    // Leaving the page must not leave the upload running in the background.
+    _meshJob?.cancel.cancel();
     _tearDownWebView();
     super.dispose();
   }
@@ -280,19 +297,30 @@ class _ViewerPageState extends State<ViewerPage> {
 
   Future<void> _meshOnServer() async {
     final settings = _services.settings.value;
-    if (!settings.hasBackend || _busyLabel != null) return;
-    setState(() => _busyLabel = 'Meshing on server…');
+    if (!settings.hasBackend || _meshJob != null) return;
+    final job = _MeshJob();
+    setState(() => _meshJob = job);
     try {
       final bytes = await _services.files
           .originalFile(_entry.sha)
           .readAsBytes();
+      final total = formatBytes(bytes.length);
       final result = await _services.backend.mesh(
         settings.backendUrl,
         bytes: bytes,
         name: _entry.name,
         quality: settings.meshQuality,
         apiKey: settings.apiKey,
+        cancel: job.cancel,
+        onUploadProgress: (sent, length) => _setMeshStatus(
+          job,
+          sent >= length
+              ? 'Uploaded $total · waiting for Rhino.Compute…'
+              : 'Uploading $total · ${(sent * 100 / length).floor()} %',
+        ),
       );
+      // A response that raced the Cancel tap is not what the user asked for.
+      if (job.cancel.isCancelled || !mounted) return;
       if (result.meshedCount == 0) {
         final skipped = result.skippedCount;
         _snack(
@@ -311,14 +339,19 @@ class _ViewerPageState extends State<ViewerPage> {
       );
       await _startLoad();
     } on BackendException catch (e) {
-      _snack('Server meshing failed: $e');
+      if (e.code != 'cancelled') _snack('Server meshing failed: $e');
     } on InvalidModelFileException catch (e) {
       _snack(e.message);
     } on IOException catch (e) {
       _snack('Server meshing failed: $e');
     } finally {
-      if (mounted) setState(() => _busyLabel = null);
+      if (mounted) setState(() => _meshJob = null);
     }
+  }
+
+  void _setMeshStatus(_MeshJob job, String status) {
+    if (!mounted || !identical(_meshJob, job) || job.status == status) return;
+    setState(() => job.status = status);
   }
 
   void _exportGlb() {
@@ -444,7 +477,9 @@ class _ViewerPageState extends State<ViewerPage> {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
+      ..showSnackBar(
+        SnackBar(content: Text(message), margin: kViewerSnackBarMargin),
+      );
   }
 
   @override
@@ -452,6 +487,7 @@ class _ViewerPageState extends State<ViewerPage> {
     final stats = _stats;
     final picked = _picked;
     final progress = _progress;
+    final meshJob = _meshJob;
     final bottomInset = MediaQuery.paddingOf(context).bottom;
     return Scaffold(
       backgroundColor: AppColors.bg,
@@ -521,7 +557,15 @@ class _ViewerPageState extends State<ViewerPage> {
                     onBack: () => Navigator.of(context).maybePop(),
                     onMenu: _onMenu,
                   ),
-                  if (stats != null && stats.hasUnmeshed && _error == null)
+                  if (meshJob != null)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(kGap, kGap, kGap, 0),
+                      child: MeshingBanner(
+                        status: meshJob.status,
+                        onCancel: meshJob.cancel.cancel,
+                      ),
+                    )
+                  else if (stats != null && stats.hasUnmeshed && _error == null)
                     Padding(
                       padding: const EdgeInsets.fromLTRB(kGap, kGap, kGap, 0),
                       child: ValueListenableBuilder<AppSettings>(

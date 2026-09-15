@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -309,9 +310,99 @@ void main() {
     });
   });
 
+  group('cancellation and upload progress', () {
+    final body = Uint8List.fromList(List.generate(600000, (i) => i & 0xFF));
+
+    test('cancel aborts the request and fails with code cancelled', () async {
+      final client = _AbortHonouringClient();
+      final cancel = CancelToken();
+      final pending = BackendClient(client: client)
+          .mesh('http://h', bytes: body, name: 'big.3dm', cancel: cancel);
+      await client.sent.future;
+      expect(client.abortTrigger, isNotNull, reason: 'request is Abortable');
+      cancel.cancel();
+      await expectLater(
+        pending,
+        throwsA(
+          isA<BackendException>()
+              .having((e) => e.statusCode, 'status', 0)
+              .having((e) => e.code, 'code', 'cancelled'),
+        ),
+      );
+      expect(cancel.isCancelled, isTrue);
+    });
+
+    test('cancel wins even with a client that ignores abortTrigger', () async {
+      final client = MockClient((_) async {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        return http.Response.bytes([1], 200);
+      });
+      final cancel = CancelToken()..cancel();
+      final started = DateTime.now();
+      await expectLater(
+        BackendClient(
+          client: client,
+          meshTimeout: const Duration(milliseconds: 150),
+        ).mesh('http://h', bytes: body, name: 'n', cancel: cancel),
+        throwsA(
+          isA<BackendException>().having((e) => e.code, 'code', 'cancelled'),
+        ),
+      );
+      expect(
+        DateTime.now().difference(started),
+        lessThan(const Duration(milliseconds: 100)),
+      );
+    });
+
+    test('a cancelled token does not disturb an unrelated call', () async {
+      final client = MockClient((_) async => http.Response.bytes([1], 200));
+      final result = await BackendClient(client: client)
+          .mesh('http://h', bytes: body, name: 'n', cancel: CancelToken());
+      expect(result.bytes, [1]);
+    });
+
+    test('upload progress runs from 0 to the body size in chunks', () async {
+      late http.Request seen;
+      final client = MockClient((request) async {
+        seen = request;
+        return http.Response.bytes([1], 200);
+      });
+      final progress = <(int, int)>[];
+      await BackendClient(client: client).mesh(
+        'http://h',
+        bytes: body,
+        name: 'n',
+        onUploadProgress: (sent, total) => progress.add((sent, total)),
+      );
+      expect(seen.bodyBytes, body, reason: 'chunks reassemble to the body');
+      expect(progress.first, (0, body.length));
+      expect(progress.last, (body.length, body.length));
+      expect(progress.length, greaterThanOrEqualTo(3));
+      for (var i = 1; i < progress.length; i++) {
+        expect(progress[i].$1, greaterThan(progress[i - 1].$1));
+      }
+    });
+  });
+
   test('MeshQuality wire names', () {
     expect(MeshQuality.standard.wireName, 'default');
     expect(MeshQuality.fromWire('draft'), MeshQuality.draft);
     expect(MeshQuality.fromWire('bogus'), MeshQuality.standard);
   });
+}
+
+/// Behaves like IOClient with respect to [http.Abortable]: the request fails
+/// with [http.RequestAbortedException] once the trigger completes.
+class _AbortHonouringClient extends http.BaseClient {
+  final Completer<void> sent = Completer<void>();
+  Future<void>? abortTrigger;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    await request.finalize().toBytes();
+    if (request is http.Abortable) abortTrigger = request.abortTrigger;
+    sent.complete();
+    await abortTrigger;
+    throw http.RequestAbortedException(request.url);
+  }
 }

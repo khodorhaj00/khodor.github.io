@@ -93,6 +93,14 @@ ThemeData buildAppTheme() {
       shape: shape,
       textStyle: TextStyle(color: AppColors.text, fontSize: 14),
     ),
+    dropdownMenuTheme: const DropdownMenuThemeData(
+      textStyle: TextStyle(color: AppColors.text, fontSize: 14),
+      menuStyle: MenuStyle(
+        backgroundColor: WidgetStatePropertyAll(AppColors.surface),
+        elevation: WidgetStatePropertyAll(0),
+        shape: WidgetStatePropertyAll(shape),
+      ),
+    ),
     snackBarTheme: const SnackBarThemeData(
       backgroundColor: AppColors.surface,
       contentTextStyle: TextStyle(color: AppColors.text),

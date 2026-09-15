@@ -64,7 +64,7 @@ class StatsSheet extends StatelessWidget {
           _Line('Layers', formatCount(stats.layers.length)),
           _Section('Geometry'),
           _Line('Units', stats.units),
-          _Line('Extents', '$size ${stats.units}'),
+          _Line('Extents', withUnit(size, stats.units)),
           _Line(
             'Unmeshed',
             '${stats.unmeshed.total} (${stats.unmeshed.breps} Brep, ${stats.unmeshed.extrusions} Extrusion)',

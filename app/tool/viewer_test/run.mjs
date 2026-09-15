@@ -21,6 +21,15 @@ const BLANK_THRESHOLD = 0.02;
 const MIN_MODEL_LUMINANCE = 60;
 const BOX_TRIANGLES = 12;
 const SPHERE_TRIANGLES = 24 * 12 * 2; // sphere_mesh(nu=24, nv=12) quads, two triangles each
+// Fraction of the viewport width or height the drawn model must span after a fit (the
+// viewer aims at 80% of the limiting axis for the model's silhouette).
+const MIN_FIT_FILL = 0.55;
+// A pixel counts as visibly changed by a pick highlight when |dR|+|dG|+|dB| exceeds this,
+// and a highlight must change at least PICK_MIN_CHANGED pixels around the picked object.
+const PICK_MIN_DIFF = 60;
+const PICK_MIN_CHANGED = 200;
+const LANDSCAPE = { width: 1280, height: 800 };
+const PORTRAIT = { width: 412, height: 915 };
 
 const FIXTURES = [
   { name: 'meshes.3dm', url: '/backend/test/fixtures/meshes.3dm' },
@@ -122,8 +131,9 @@ async function settle(page) {
 }
 
 // Reads the WebGL canvas back through a 2D canvas: counts pixels that were drawn
-// (the renderer clears to transparent, so anything with alpha is model or grid), averages
-// their luminance and hashes the whole frame so two renders can be compared.
+// (the renderer clears to transparent, so anything with alpha is model or grid), their
+// bounding box and mean luminance, and hashes the whole frame so two renders can be
+// compared.
 async function frameSignature(page) {
   return page.evaluate(() => {
     const source = document.querySelector('canvas');
@@ -133,6 +143,7 @@ async function frameSignature(page) {
     const ctx = copy.getContext('2d');
     ctx.drawImage(source, 0, 0);
     const data = ctx.getImageData(0, 0, copy.width, copy.height).data;
+    const bounds = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
     let drawn = 0;
     let luminance = 0;
     let hash = 2166136261;
@@ -140,14 +151,115 @@ async function frameSignature(page) {
       if (data[i + 3] !== 0) {
         drawn += 1;
         luminance += 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+        const x = (i / 4) % copy.width;
+        const y = Math.floor(i / 4 / copy.width);
+        bounds.minX = Math.min(bounds.minX, x);
+        bounds.maxX = Math.max(bounds.maxX, x);
+        bounds.minY = Math.min(bounds.minY, y);
+        bounds.maxY = Math.max(bounds.maxY, y);
       }
       hash = Math.imul(hash ^ data[i], 16777619);
       hash = Math.imul(hash ^ data[i + 1], 16777619);
       hash = Math.imul(hash ^ data[i + 2], 16777619);
       hash = Math.imul(hash ^ data[i + 3], 16777619);
     }
-    return { drawn, total: data.length / 4, meanLuminance: drawn ? luminance / drawn : 0, hash: hash >>> 0 };
+    return {
+      drawn,
+      total: data.length / 4,
+      width: copy.width,
+      height: copy.height,
+      bounds,
+      meanLuminance: drawn ? luminance / drawn : 0,
+      hash: hash >>> 0,
+    };
   });
+}
+
+// Keeps a copy of the current canvas in the page (window.__frames[key]) so two frames can
+// be compared pixel by pixel without shipping megabytes over the protocol.
+async function captureFrame(page, key) {
+  await settle(page);
+  await page.evaluate((k) => {
+    const source = document.querySelector('canvas');
+    const copy = document.createElement('canvas');
+    copy.width = source.width;
+    copy.height = source.height;
+    const ctx = copy.getContext('2d');
+    ctx.drawImage(source, 0, 0);
+    (window.__frames ||= {})[k] = ctx.getImageData(0, 0, copy.width, copy.height);
+  }, key);
+}
+
+// Pixels whose colour differs between two captured frames by more than minDiff
+// (|dR|+|dG|+|dB|, alpha changes count as a full difference), with their bounding box.
+async function frameDiff(page, keyA, keyB, minDiff) {
+  return page.evaluate(([a, b, min]) => {
+    const A = window.__frames[a];
+    const B = window.__frames[b];
+    const bounds = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+    let changed = 0;
+    for (let i = 0; i < A.data.length; i += 4) {
+      const diff = A.data[i + 3] !== B.data[i + 3]
+        ? 765
+        : Math.abs(A.data[i] - B.data[i]) + Math.abs(A.data[i + 1] - B.data[i + 1]) + Math.abs(A.data[i + 2] - B.data[i + 2]);
+      if (diff <= min) continue;
+      changed += 1;
+      const x = (i / 4) % A.width;
+      const y = Math.floor(i / 4 / A.width);
+      bounds.minX = Math.min(bounds.minX, x);
+      bounds.maxX = Math.max(bounds.maxX, x);
+      bounds.minY = Math.min(bounds.minY, y);
+      bounds.maxY = Math.max(bounds.maxY, y);
+    }
+    return { changed, bounds };
+  }, [keyA, keyB, minDiff]);
+}
+
+// First pixel in raster order that matches a named colour class, or null.
+async function findPixel(page, colorClass) {
+  return page.evaluate((cls) => {
+    const classes = {
+      white: (r, g, b) => r >= 240 && g >= 240 && b >= 240,
+      grey: (r, g, b) => Math.abs(r - g) < 25 && Math.abs(g - b) < 25 && g > 100,
+      purple: (r, g, b) => r > 140 && b > 140 && g < 120,
+    };
+    const source = document.querySelector('canvas');
+    const copy = document.createElement('canvas');
+    copy.width = source.width;
+    copy.height = source.height;
+    const ctx = copy.getContext('2d');
+    ctx.drawImage(source, 0, 0);
+    const data = ctx.getImageData(0, 0, copy.width, copy.height).data;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] !== 0 && classes[cls](data[i], data[i + 1], data[i + 2])) {
+        return { x: (i / 4) % copy.width, y: Math.floor(i / 4 / copy.width) };
+      }
+    }
+    return null;
+  }, colorClass);
+}
+
+// The drawn model (grid off) spans at least MIN_FIT_FILL of the viewport width or height
+// and touches no edge.
+function checkFramed(signature, label) {
+  const { bounds, width, height } = signature;
+  const fillX = (bounds.maxX - bounds.minX + 1) / width;
+  const fillY = (bounds.maxY - bounds.minY + 1) / height;
+  const inside = bounds.minX > 0 && bounds.minY > 0 && bounds.maxX < width - 1 && bounds.maxY < height - 1;
+  check(
+    inside && Math.max(fillX, fillY) >= MIN_FIT_FILL,
+    `${label}: drawn ${(fillX * 100).toFixed(0)}% x ${(fillY * 100).toFixed(0)}% of ${width}x${height}, x[${bounds.minX},${bounds.maxX}] y[${bounds.minY},${bounds.maxY}] (>= ${(MIN_FIT_FILL * 100).toFixed(0)}% on one axis, no edge touched)`,
+  );
+}
+
+// Resizes the viewport (a phone rotation) and waits for the viewer's resize handling.
+async function setViewport(page, size) {
+  await page.setViewportSize(size);
+  await page.waitForFunction(
+    ({ width, height }) => window.innerWidth === width && window.innerHeight === height && document.querySelector('canvas').width === width,
+    size,
+  );
+  await settle(page);
 }
 
 // Counts every <img> decode the page starts (the stock loader decodes embedded textures
@@ -222,6 +334,7 @@ async function checkNotBlank(page, label) {
   const signature = await modelSignature(page);
   const ratio = signature.drawn / signature.total;
   check(ratio > BLANK_THRESHOLD, `${label}: ${(ratio * 100).toFixed(1)}% of pixels drawn (> ${BLANK_THRESHOLD * 100}%)`);
+  checkFramed(signature, label);
   return signature;
 }
 
@@ -341,6 +454,33 @@ async function pageCheckBlackLayer(page, stats, signature) {
   const isWhite = (f) => f.every((v) => v === 1);
   check(factors.some(isBlack) && factors.some(isDarkRed), `black_layer.3dm: export keeps the file colours ${JSON.stringify(factors)}`);
   check(factors.every((f) => isBlack(f) || isDarkRed(f) || isWhite(f)), `black_layer.3dm: no export material is lifted ${JSON.stringify(factors)}`);
+
+  // Picking the (lifted) black box highlights it visibly. Top view with the curve and the
+  // point hidden: the first grey pixel in raster order is the black box's top face.
+  await page.evaluate(() => {
+    window.viewer.setCurvesVisible(false);
+    window.viewer.setPointsVisible(false);
+    window.viewer.setView('top');
+    window.viewer.setGrid(false);
+  });
+  await captureFrame(page, 'plain');
+  const corner = await findPixel(page, 'grey');
+  check(corner !== null, `black_layer.3dm: grey pixel found at ${JSON.stringify(corner)}`);
+  if (corner) {
+    const tap = { x: corner.x + 12, y: corner.y + 12 };
+    const hit = await pickAt(page, tap.x, tap.y, 'black_layer.3dm: pick');
+    checkEqual(hit && hit.name, 'black_box', 'black_layer.3dm: picked object');
+    // Two 100-unit boxes fill the width here, so the box is ~250px wide.
+    await checkHighlight(page, 'black', tap.x, tap.y, 320, 'black_layer.3dm: pick black box: highlight visible');
+    await page.screenshot({ path: path.join(outDir, 'black_layer_picked.png') });
+    await pickAt(page, 4, 4, 'black_layer.3dm: clear pick');
+  }
+  await page.evaluate(() => {
+    window.viewer.setGrid(true);
+    window.viewer.setCurvesVisible(true);
+    window.viewer.setPointsVisible(true);
+    window.viewer.setView('iso');
+  });
 }
 
 async function pageCheckTextured(page) {
@@ -417,6 +557,7 @@ async function testViewsAndProjection(page) {
     await page.evaluate((v) => window.viewer.setView(v), view);
     const signature = await modelSignature(page);
     check(signature.drawn / signature.total > BLANK_THRESHOLD, `view ${view}: ${signature.drawn} pixels drawn`);
+    checkFramed(signature, `view ${view}`);
     hashes.add(signature.hash);
     if (view === 'top') await page.screenshot({ path: path.join(outDir, 'meshes_top.png') });
   }
@@ -425,20 +566,84 @@ async function testViewsAndProjection(page) {
   await page.evaluate(() => window.viewer.setProjection('ortho'));
   const ortho = await modelSignature(page);
   check(ortho.drawn / ortho.total > BLANK_THRESHOLD && ortho.hash !== perspective.hash, `projection ortho: ${ortho.drawn} pixels drawn, differs from perspective`);
+  checkFramed(ortho, 'projection ortho (framing kept)');
   await page.evaluate(() => window.viewer.setProjection('perspective'));
   const back = await modelSignature(page);
   check(Math.abs(back.drawn - perspective.drawn) / perspective.drawn < 0.05, `projection perspective restored: ${perspective.drawn} → ${back.drawn} pixels`);
+
+  // fit() frames the ortho camera too.
+  await page.evaluate(() => window.viewer.setProjection('ortho'));
+  for (const view of ['top', 'iso']) {
+    await page.evaluate((v) => window.viewer.setView(v), view);
+    checkFramed(await modelSignature(page), `ortho fit (${view} view)`);
+    if (view === 'top') await page.screenshot({ path: path.join(outDir, 'meshes_top_ortho.png') });
+  }
+  await page.evaluate(() => window.viewer.setProjection('perspective'));
   await page.evaluate(() => window.viewer.fit());
+}
+
+// A phone rotation resizes the page: the fitted model must be re-framed for the new
+// aspect (not cropped at the sides) in both projections, and rotating back restores the
+// original framing.
+async function testResize(page) {
+  await page.evaluate(() => window.viewer.setView('top'));
+  const landscape = await modelSignature(page);
+  checkFramed(landscape, 'resize: landscape top view');
+  await setViewport(page, PORTRAIT);
+  checkFramed(await modelSignature(page), 'resize: portrait after rotation');
+  await page.screenshot({ path: path.join(outDir, 'meshes_top_portrait.png') });
+  await setViewport(page, LANDSCAPE);
+  const back = await modelSignature(page);
+  const b = back.bounds;
+  const l = landscape.bounds;
+  check(
+    [b.minX - l.minX, b.maxX - l.maxX, b.minY - l.minY, b.maxY - l.maxY].every((d) => Math.abs(d) <= 2),
+    `resize: landscape framing restored x[${b.minX},${b.maxX}] y[${b.minY},${b.maxY}] (was x[${l.minX},${l.maxX}] y[${l.minY},${l.maxY}])`,
+  );
+
+  await page.evaluate(() => window.viewer.setProjection('ortho'));
+  await setViewport(page, PORTRAIT);
+  checkFramed(await modelSignature(page), 'resize: portrait ortho after rotation');
+  await setViewport(page, LANDSCAPE);
+  checkFramed(await modelSignature(page), 'resize: landscape ortho after rotating back');
+  await page.evaluate(() => window.viewer.setProjection('perspective'));
+}
+
+// Taps at a page position and returns the single objectPicked payload (or undefined).
+async function pickAt(page, x, y, label) {
+  const from = await eventCount(page);
+  await page.mouse.click(x, y);
+  const events = (await eventsSince(page, from)).filter((e) => e.name === 'objectPicked');
+  checkEqual(events.length, 1, `${label}: one objectPicked event`);
+  return events[0] ? events[0].payload : undefined;
+}
+
+// A highlight must be unmistakable whatever the object's colour: compared with the
+// 'plain' frame, at least PICK_MIN_CHANGED pixels change visibly, all within `reach`
+// pixels of the tap (so a previous highlight elsewhere must be gone).
+async function checkHighlight(page, key, x, y, reach, label) {
+  await captureFrame(page, key);
+  const diff = await frameDiff(page, 'plain', key, PICK_MIN_DIFF);
+  const b = diff.bounds;
+  const local = diff.changed > 0 && b.minX >= x - reach && b.maxX <= x + reach && b.minY >= y - reach && b.maxY <= y + reach;
+  check(
+    diff.changed >= PICK_MIN_CHANGED && local,
+    `${label}: ${diff.changed} pixels changed by > ${PICK_MIN_DIFF}/765 (>= ${PICK_MIN_CHANGED}), within ${reach}px of the tap (x[${b.minX},${b.maxX}] y[${b.minY},${b.maxY}] around ${x},${y})`,
+  );
 }
 
 async function testPicking(page) {
   const viewport = page.viewportSize();
-  const from = await eventCount(page);
-  await page.mouse.click(viewport.width / 2, viewport.height / 2);
-  const events = (await eventsSince(page, from)).filter((e) => e.name === 'objectPicked');
-  checkEqual(events.length, 1, 'pick centre: one objectPicked event');
-  const hit = events[0] && events[0].payload;
-  check(hit !== null && typeof hit === 'object', `pick centre: hit ${hit ? `${hit.objectType} "${hit.name}" on ${hit.layerName}` : 'nothing'}`);
+  // Top view, grid off: the centre ray goes straight down through the yellow sphere
+  // (its footprint covers the model centre), and the first white pixel in raster order is
+  // the top face of the top-left FOAM box.
+  await page.evaluate(() => window.viewer.setView('top'));
+  await page.evaluate(() => window.viewer.setGrid(false));
+  await captureFrame(page, 'plain');
+
+  const centre = { x: viewport.width / 2, y: viewport.height / 2 };
+  const hit = await pickAt(page, centre.x, centre.y, 'pick centre');
+  check(hit && hit.name === 'sphere_ref', `pick centre: hit ${hit ? `${hit.objectType} "${hit.name}" on ${hit.layerName}` : 'nothing'}`);
   if (hit) {
     check(typeof hit.id === 'string' && hit.id.length > 0, 'pick: id is a guid string');
     check(Array.isArray(hit.size) && hit.size.length === 3 && hit.size.every((v) => v > 0), `pick: size ${JSON.stringify(hit.size)}`);
@@ -446,36 +651,50 @@ async function testPicking(page) {
     check(typeof hit.userStrings === 'object' && hit.userStrings !== null, `pick: userStrings ${JSON.stringify(hit.userStrings)}`);
     check(typeof hit.layerIndex === 'number', `pick: layerIndex ${hit.layerIndex}`);
   }
-  const highlighted = await modelSignature(page);
-  await page.screenshot({ path: path.join(outDir, 'meshes_picked.png') });
+  // The sphere (300 units) is drawn ~250px wide here; its highlight cage sits around it.
+  await checkHighlight(page, 'sphere', centre.x, centre.y, 320, 'pick yellow sphere: highlight visible');
+  await page.screenshot({ path: path.join(outDir, 'meshes_picked_sphere.png') });
 
-  // Lower-left box of the grid in the fitted iso view (fixed 1280x800 viewport).
-  const from1 = await eventCount(page);
-  await page.mouse.click(430, 600);
-  const box = (await eventsSince(page, from1)).find((e) => e.name === 'objectPicked');
-  const boxHit = box && box.payload;
-  check(boxHit && /^block_\d_\d$/.test(boxHit.name), `pick box: hit ${boxHit ? `"${boxHit.name}" on ${boxHit.layerName}` : 'nothing'}`);
+  const corner = await findPixel(page, 'white');
+  check(corner !== null, `pick box: white pixel found at ${JSON.stringify(corner)}`);
+  const tap = corner ? { x: corner.x + 12, y: corner.y + 12 } : centre;
+  const boxHit = await pickAt(page, tap.x, tap.y, 'pick box');
+  check(boxHit && /^block_\d_\d$/.test(boxHit.name) && boxHit.layerName === 'FOAM', `pick box: hit ${boxHit ? `"${boxHit.name}" on ${boxHit.layerName}` : 'nothing'}`);
   if (boxHit) {
     check(boxHit.userStrings.PART_ID === boxHit.name.replace('block_', 'P').replace('_', ''), `pick box: userStrings ${JSON.stringify(boxHit.userStrings)}`);
     check(boxHit.size.every((v) => Math.abs(v - 100) < 1e-6), `pick box: size ${JSON.stringify(boxHit.size)}`);
   }
+  // Only the ~85px box may differ from the plain frame: the sphere's highlight is gone.
+  await checkHighlight(page, 'box', tap.x, tap.y, 140, 'pick white box: highlight visible, sphere highlight cleared');
+  await page.screenshot({ path: path.join(outDir, 'meshes_picked.png') });
 
-  const from2 = await eventCount(page);
-  await page.mouse.click(4, 4);
-  const cleared = (await eventsSince(page, from2)).filter((e) => e.name === 'objectPicked');
-  check(cleared.length === 1 && cleared[0].payload === null, 'pick empty corner: objectPicked null');
-  const plain = await modelSignature(page);
-  check(plain.hash !== highlighted.hash, 'pick: highlight cleared changes the frame');
+  const cleared = await pickAt(page, 4, 4, 'pick empty corner');
+  check(cleared === null, 'pick empty corner: objectPicked null');
+  await captureFrame(page, 'cleared');
+  const restored = await frameDiff(page, 'plain', 'cleared', 0);
+  checkEqual(restored.changed, 0, 'pick cleared: frame restored (changed pixels)');
+  await page.evaluate(() => window.viewer.setGrid(true));
+}
+
+// Taps just inside the top-left corner of the first box drawn in the layer colour
+// (top view, grid off) and returns the objectPicked payload.
+async function pickFirstBox(page, colorClass, label) {
+  await page.evaluate(() => {
+    window.viewer.setView('top');
+    window.viewer.setGrid(false);
+  });
+  await settle(page);
+  const corner = await findPixel(page, colorClass);
+  check(corner !== null, `${label}: ${colorClass} pixel found at ${JSON.stringify(corner)}`);
+  if (!corner) return undefined;
+  return pickAt(page, corner.x + 10, corner.y + 10, label);
 }
 
 // Tapping block content reports the top-level instance (name, layer, user strings), not
 // the anonymous definition member.
 async function testPickingBlocks(page) {
-  const viewport = page.viewportSize();
   await loadModel(page, { url: '/backend/test/fixtures/blocks.3dm', name: 'blocks.3dm' });
-  const from = await eventCount(page);
-  await page.mouse.click(viewport.width / 2, viewport.height / 2);
-  const hit = ((await eventsSince(page, from)).find((e) => e.name === 'objectPicked') || {}).payload;
+  const hit = await pickFirstBox(page, 'purple', 'pick block');
   check(hit && /^ref_\d$/.test(hit.name), `pick block: hit ${hit ? `${hit.objectType} "${hit.name}" on ${hit.layerName}` : 'nothing'}`);
   if (hit) {
     checkEqual(hit.objectType, 'InstanceReference', 'pick block: objectType');
@@ -485,14 +704,13 @@ async function testPickingBlocks(page) {
   }
 
   await loadModel(page, { url: '/app/tool/viewer_test/fixtures/nested_blocks.3dm', name: 'nested_blocks.3dm' });
-  const from1 = await eventCount(page);
-  await page.mouse.click(viewport.width / 2, viewport.height / 2);
-  const nested = ((await eventsSince(page, from1)).find((e) => e.name === 'objectPicked') || {}).payload;
+  const nested = await pickFirstBox(page, 'purple', 'pick nested block');
   check(nested && /^(outer_ref_\d|inner_ref)$/.test(nested.name), `pick nested block: hit ${nested ? `${nested.objectType} "${nested.name}" (block ${nested.blockName})` : 'nothing'}`);
   if (nested && nested.name.startsWith('outer_ref_')) {
     checkEqual(nested.blockName, 'outer', 'pick nested block: top-level instance, not the nested one');
     checkEqual(nested.userStrings.PART_ID, nested.name.replace('outer_ref_', 'OUTER'), `pick nested block: userStrings ${JSON.stringify(nested.userStrings)}`);
   }
+  await page.evaluate(() => window.viewer.setGrid(true));
 }
 
 async function testGetStats(page, expected) {
@@ -582,7 +800,7 @@ async function main() {
   });
   const timings = [];
   try {
-    const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 });
+    const context = await browser.newContext({ viewport: LANDSCAPE, deviceScaleFactor: 1 });
     const page = await context.newPage();
     page.setDefaultTimeout(120000);
     await installImageLoadCounter(page);
@@ -627,6 +845,7 @@ async function main() {
       await testCurvesAndPoints(page);
       await testDisplayModes(page);
       await testViewsAndProjection(page);
+      await testResize(page);
       await testPicking(page);
       console.log('\n== picking (blocks.3dm, nested_blocks.3dm)');
       await testPickingBlocks(page);

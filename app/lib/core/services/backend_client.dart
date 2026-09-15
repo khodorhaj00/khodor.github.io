@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
@@ -21,8 +22,27 @@ enum MeshQuality {
   );
 }
 
+/// Reports upload progress of [BackendClient.mesh] / [BackendClient.convert]
+/// as bytes handed to the socket out of the request body size.
+typedef UploadProgressCallback = void Function(int sent, int total);
+
+/// Cancels an in-flight [BackendClient.mesh] / [BackendClient.convert] call:
+/// the request is aborted and the call fails with code `cancelled`.
+class CancelToken {
+  final Completer<void> _completer = Completer<void>();
+
+  bool get isCancelled => _completer.isCompleted;
+
+  /// Completes when [cancel] is called; never completes with an error.
+  Future<void> get whenCancelled => _completer.future;
+
+  void cancel() {
+    if (!_completer.isCompleted) _completer.complete();
+  }
+}
+
 /// Raised for any failed backend call. [statusCode] is 0 when the request
-/// never produced an HTTP response (network error, timeout).
+/// never produced an HTTP response (network error, timeout, cancellation).
 class BackendException implements Exception {
   const BackendException({
     required this.statusCode,
@@ -177,6 +197,8 @@ class BackendClient {
     required String name,
     MeshQuality quality = MeshQuality.standard,
     String? apiKey,
+    CancelToken? cancel,
+    UploadProgressCallback? onUploadProgress,
   }) async {
     final response = await _post(
       endpoint(
@@ -186,6 +208,8 @@ class BackendClient {
       ),
       bytes,
       apiKey,
+      cancel: cancel,
+      onUploadProgress: onUploadProgress,
     );
     return MeshResult(
       bytes: response.bodyBytes,
@@ -201,6 +225,8 @@ class BackendClient {
     required String name,
     MeshQuality quality = MeshQuality.standard,
     String? apiKey,
+    CancelToken? cancel,
+    UploadProgressCallback? onUploadProgress,
   }) async {
     final response = await _post(
       endpoint(
@@ -210,6 +236,8 @@ class BackendClient {
       ),
       bytes,
       apiKey,
+      cancel: cancel,
+      onUploadProgress: onUploadProgress,
     );
     return ConvertResult(
       bytes: response.bodyBytes,
@@ -219,18 +247,30 @@ class BackendClient {
     );
   }
 
-  Future<http.Response> _post(Uri uri, Uint8List body, String? apiKey) async {
+  Future<http.Response> _post(
+    Uri uri,
+    Uint8List body,
+    String? apiKey, {
+    CancelToken? cancel,
+    UploadProgressCallback? onUploadProgress,
+  }) async {
+    final request =
+        _UploadRequest(
+            uri,
+            body,
+            abortTrigger: cancel?.whenCancelled,
+            onProgress: onUploadProgress,
+          )
+          ..headers.addAll({
+            ..._headers(apiKey),
+            HttpHeaders.contentTypeHeader: 'application/octet-stream',
+          });
     final response = await _guard(
       () => _client
-          .post(
-            uri,
-            headers: {
-              ..._headers(apiKey),
-              HttpHeaders.contentTypeHeader: 'application/octet-stream',
-            },
-            body: body,
-          )
+          .send(request)
+          .then(http.Response.fromStream)
           .timeout(meshTimeout),
+      cancel: cancel,
     );
     _throwIfError(response);
     return response;
@@ -247,10 +287,13 @@ class BackendClient {
       BackendException(statusCode: 0, code: 'bad_url', detail: detail);
 
   static Future<http.Response> _guard(
-    Future<http.Response> Function() request,
-  ) async {
+    Future<http.Response> Function() request, {
+    CancelToken? cancel,
+  }) async {
     try {
-      return await request();
+      return await _cancellable(request(), cancel);
+    } on BackendException {
+      rethrow;
     } on TimeoutException {
       throw const BackendException(
         statusCode: 0,
@@ -270,6 +313,32 @@ class BackendClient {
     }
   }
 
+  // The abort trigger makes clients that support it fail the request right
+  // away; racing the token as well keeps the caller from waiting out the
+  // timeout with clients that ignore it, and turns whatever error the abort
+  // produced into `cancelled`.
+  static Future<http.Response> _cancellable(
+    Future<http.Response> pending,
+    CancelToken? cancel,
+  ) async {
+    if (cancel == null) return pending;
+    try {
+      return await Future.any([
+        pending,
+        cancel.whenCancelled.then((_) => throw _cancelled()),
+      ]);
+    } catch (_) {
+      if (cancel.isCancelled) throw _cancelled();
+      rethrow;
+    }
+  }
+
+  static BackendException _cancelled() => const BackendException(
+    statusCode: 0,
+    code: 'cancelled',
+    detail: 'Cancelled',
+  );
+
   static void _throwIfError(http.Response response) {
     if (response.statusCode >= 200 && response.statusCode < 300) return;
     var code = 'http_${response.statusCode}';
@@ -288,5 +357,44 @@ class BackendClient {
       code: code,
       detail: detail,
     );
+  }
+}
+
+/// Octet-stream POST whose body is pulled chunk by chunk, so the progress
+/// callback tracks what the socket has accepted rather than what was
+/// buffered up front (dart:io propagates the socket's backpressure to the
+/// body stream).
+class _UploadRequest extends http.BaseRequest with http.Abortable {
+  _UploadRequest(
+    Uri url,
+    this._body, {
+    required this.abortTrigger,
+    required this.onProgress,
+  }) : super('POST', url) {
+    contentLength = _body.length;
+  }
+
+  static const int chunkSize = 256 << 10;
+
+  final Uint8List _body;
+  final UploadProgressCallback? onProgress;
+
+  @override
+  final Future<void>? abortTrigger;
+
+  @override
+  http.ByteStream finalize() {
+    super.finalize();
+    return http.ByteStream(_chunks());
+  }
+
+  Stream<List<int>> _chunks() async* {
+    onProgress?.call(0, _body.length);
+    for (var offset = 0; offset < _body.length; offset += chunkSize) {
+      final end = math.min(offset + chunkSize, _body.length);
+      // yield resumes only once the consumer has taken the chunk.
+      yield Uint8List.sublistView(_body, offset, end);
+      onProgress?.call(end, _body.length);
+    }
   }
 }
