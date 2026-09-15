@@ -270,6 +270,8 @@ backend/                  Node 22 / Express 5 appserver: /health, /mesh, /conver
 samples/Rhino_Logo.3dm    real Rhino-saved sample (three.js repository)
 scripts/                  gen-keystore.sh, set-github-secrets.sh
 docs/ARCHITECTURE.md      contracts between app, viewer page, backend and CI
+docs/BUILD_PLAYBOOK.md    how to rebuild the APK, pinned versions and why, and every
+                          trap this build hit, for the next app like it
 .github/workflows/        build-apk.yml (analyze, test, APKs, release, viewer harness), backend-ci.yml
 index.html, index_files/  pre-existing GitHub Pages site, not part of the app
 ```
