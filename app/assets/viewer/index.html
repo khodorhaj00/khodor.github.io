@@ -5,6 +5,414 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 <title>Rhino Viewer</title>
+<script>
+/*
+ * Start-up guard. Plain ES5, inline, and first in the document so it is already running
+ * before anything else can fail: it survives a missing stylesheet, a WebView without
+ * module or import-map support, a module script that does not load, a rhino3dm that does
+ * not initialise and a device without usable WebGL.
+ *
+ * It owns:
+ *   - the Flutter bridge (__viewerBoot.emit, window.__viewerEvents), so failures that
+ *     happen before viewer.js runs are still reported to the app;
+ *   - the opaque backdrop and the full-screen failure screen, both styled inline so they
+ *     need no stylesheet;
+ *   - the ring buffer of the last 30 log events, for viewer.diagnostics();
+ *   - a stand-in window.viewer that answers calls with the failure instead of leaving the
+ *     app waiting for an event that can never arrive.
+ *
+ * viewer.js calls starting()/booted() and replaces window.viewer once it is up.
+ */
+(function () {
+  'use strict';
+
+  var LOG_LIMIT = 30;
+  // Backstop for a module that starts but never finishes; the DOMContentLoaded check below
+  // already catches the common case (a module script that never ran at all).
+  var BOOT_TIMEOUT_MS = 15000;
+  var BG = '#0E1013';
+  var TEXT = '#E6E8EB';
+  var MUTED = '#8B93A1';
+  var ACCENT = '#FFB020';
+  var ERROR_HINT = 'Go back and open the file again. If it keeps happening, send this message with the file.';
+  var NOTICE_HINT = 'This usually recovers by itself. If the view stays blank, go back and open the file again.';
+
+  var OVERLAY_CSS = 'position:fixed;top:0;right:0;bottom:0;left:0;z-index:2147483000;box-sizing:border-box;'
+    + 'display:flex;align-items:center;justify-content:center;padding:24px 16px;overflow:auto;'
+    + 'background:' + BG + ';color:' + TEXT + ';'
+    + 'font:400 15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;'
+    + '-webkit-user-select:text;user-select:text;';
+  var CARD_CSS = 'width:100%;max-width:560px;';
+  var TITLE_CSS = 'margin:0 0 10px;color:' + ACCENT + ';font-size:17px;font-weight:600;line-height:1.35;';
+  var DETAIL_CSS = 'margin:0 0 14px;color:' + TEXT + ';white-space:pre-wrap;overflow-wrap:break-word;word-break:break-word;'
+    + 'font:400 13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;';
+  var HINT_CSS = 'margin:0;color:' + MUTED + ';font-size:12px;line-height:1.5;';
+  var BACKDROP_CSS = 'position:fixed;top:0;right:0;bottom:0;left:0;z-index:0;pointer-events:none;'
+    + 'background-color:var(--bg-bottom,#0E1013);'
+    + 'background-image:linear-gradient(180deg,var(--bg-top,#1B1F26) 0%,var(--bg-bottom,#0E1013) 100%);';
+
+  // Reported as a window error but benign by spec: the browser deferred a resize
+  // observation to the next frame. viewer.js runs a ResizeObserver, so this is expected
+  // traffic and must never be painted as a failure.
+  var BENIGN_ERROR = /^ResizeObserver loop/;
+
+  var events = window.__viewerEvents || (window.__viewerEvents = []);
+  var logs = [];
+  // `content` is true while viewer.js has a model drawn on the canvas.
+  var state = { started: false, booted: false, failure: null, content: false };
+  var pending = [];
+  var overlay = null;
+  var overlayTitle = null;
+  var overlayDetail = null;
+  var overlayHint = null;
+  var overlayKind = null;
+  var overlayContent = null;
+  var lastFailure = '';
+
+  function millis() {
+    return window.performance && performance.now ? Math.round(performance.now()) : 0;
+  }
+
+  function textOf(value) {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'string') return value;
+    if (value.message) return String(value.message);
+    try {
+      return String(value);
+    } catch (error) {
+      return 'unknown error';
+    }
+  }
+
+  function emit(name, payload) {
+    if (name === 'log' && payload) {
+      logs.push({ level: payload.level, message: payload.message, t: millis() });
+      if (logs.length > LOG_LIMIT) logs.shift();
+    }
+    var bridge = window.flutter_inappwebview;
+    if (bridge && typeof bridge.callHandler === 'function') {
+      try {
+        var sent = bridge.callHandler(name, payload);
+        // callHandler answers with a promise the app settles. Nothing here reads the
+        // answer, and a rejection — a Dart handler that threw, a WebView being torn
+        // down — would otherwise arrive as an unhandled rejection and paint a failure
+        // screen over a page that is working.
+        if (sent && typeof sent.catch === 'function') sent.catch(function () {});
+        return;
+      } catch (error) {
+        // The JavaScript interface is gone; fall through to the queue below.
+      }
+    }
+    events.push({ name: name, payload: payload });
+    // Keep the console line readable: a GLB payload can be tens of MB of base64.
+    var logged = payload;
+    if (payload && typeof payload.base64 === 'string') {
+      logged = {};
+      for (var key in payload) {
+        if (Object.prototype.hasOwnProperty.call(payload, key)) logged[key] = payload[key];
+      }
+      logged.base64 = '<' + payload.base64.length + ' chars>';
+    }
+    console.log('[viewer-event] ' + JSON.stringify({ name: name, payload: logged }));
+  }
+
+  function log(level, message) {
+    emit('log', { level: level, message: message });
+  }
+
+  // ---------------------------------------------------------------------------------
+  // Screen: opaque backdrop + failure screen, both independent of viewer.css
+  // ---------------------------------------------------------------------------------
+
+  function whenBody(fn) {
+    if (document.body) {
+      fn();
+      return;
+    }
+    pending.push(fn);
+  }
+
+  function addBackdrop() {
+    var backdrop = document.createElement('div');
+    backdrop.id = 'viewer-backdrop';
+    backdrop.style.cssText = BACKDROP_CSS;
+    // First child: viewer.js appends its canvas before DOMContentLoaded flushes this
+    // queue, and the backdrop must stay behind it.
+    document.body.insertBefore(backdrop, document.body.firstChild);
+  }
+
+  function renderOverlay() {
+    if (!overlayContent) return;
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'viewer-overlay';
+      overlay.setAttribute('role', 'alert');
+      overlay.style.cssText = OVERLAY_CSS;
+      var card = document.createElement('div');
+      card.style.cssText = CARD_CSS;
+      overlayTitle = document.createElement('p');
+      overlayTitle.style.cssText = TITLE_CSS;
+      overlayDetail = document.createElement('p');
+      overlayDetail.style.cssText = DETAIL_CSS;
+      overlayHint = document.createElement('p');
+      overlayHint.style.cssText = HINT_CSS;
+      card.appendChild(overlayTitle);
+      card.appendChild(overlayDetail);
+      card.appendChild(overlayHint);
+      overlay.appendChild(card);
+      document.body.appendChild(overlay);
+    }
+    overlayTitle.textContent = overlayContent.title;
+    overlayDetail.textContent = overlayContent.detail;
+    overlayHint.textContent = overlayContent.hint;
+    overlay.style.display = 'flex';
+  }
+
+  function showOverlay(kind, title, detail, hint) {
+    overlayKind = kind;
+    overlayContent = { title: title, detail: detail, hint: hint };
+    whenBody(renderOverlay);
+  }
+
+  function hideOverlay(kind) {
+    if (kind && overlayKind !== kind) return;
+    overlayKind = null;
+    overlayContent = null;
+    if (overlay) overlay.style.display = 'none';
+  }
+
+  // Fatal: report it, remember it so viewer calls can answer with it, and paint it while
+  // there is nothing else to look at. A model already on screen is not a blank page, so
+  // it is left alone: the app surfaces the `log` error over it instead of the user losing
+  // a working view to an error screen it cannot dismiss.
+  function fail(title, detail) {
+    var text = textOf(detail);
+    state.failure = { title: title, detail: text };
+    if (!state.content) showOverlay('error', title, text, ERROR_HINT);
+    var key = title + '\n' + text;
+    if (key === lastFailure) return;
+    lastFailure = key;
+    log('error', text ? title + ': ' + text : title);
+  }
+
+  // Recoverable (a lost WebGL context): paint only, the caller decides what to report.
+  // Always painted, model or not — a lost context leaves the last frame frozen on the
+  // canvas, which is exactly the case that looks like a working app and is not one.
+  function notice(title, detail) {
+    showOverlay('notice', title, textOf(detail), NOTICE_HINT);
+  }
+
+  // viewer.js reports whether a model is drawn; see fail(). A model coming up after a
+  // failure screen clears it, so a successful reload is not hidden behind a stale error.
+  function contentShown(shown) {
+    state.content = Boolean(shown);
+    if (state.content) hideOverlay('error');
+  }
+
+  // ---------------------------------------------------------------------------------
+  // Diagnostics
+  // ---------------------------------------------------------------------------------
+
+  function isWebGL2(gl) {
+    return Boolean(gl && typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext);
+  }
+
+  function releaseContext(gl) {
+    try {
+      var ext = gl.getExtension('WEBGL_lose_context');
+      if (ext) ext.loseContext();
+    } catch (error) {
+      /* a context that cannot be released is not worth a failure */
+    }
+  }
+
+  // What this browser actually offers. `gl` is the live rendering context when there is
+  // one; otherwise throwaway 1x1 contexts answer the question and are released again.
+  function webglInfo(gl) {
+    var info = {
+      webgl1: false,
+      webgl2: false,
+      vendor: null,
+      renderer: null,
+      unmasked: false,
+      version: null,
+      maxTextureSize: null,
+      contextLost: null,
+      error: null,
+    };
+    var probes = [];
+    var fallback = null;
+    function probe(type) {
+      var context = null;
+      try {
+        var element = document.createElement('canvas');
+        element.width = 1;
+        element.height = 1;
+        context = element.getContext(type);
+      } catch (error) {
+        context = null;
+      }
+      if (context) {
+        probes.push(context);
+        if (!fallback) fallback = context;
+      }
+      return Boolean(context);
+    }
+    try {
+      var live2 = isWebGL2(gl);
+      info.webgl2 = live2 || probe('webgl2');
+      info.webgl1 = (Boolean(gl) && !live2) || probe('webgl');
+      var source = gl || fallback;
+      if (source) {
+        info.maxTextureSize = source.getParameter(source.MAX_TEXTURE_SIZE);
+        info.contextLost = source.isContextLost();
+        info.version = source.getParameter(source.VERSION);
+        var debug = source.getExtension('WEBGL_debug_renderer_info');
+        info.unmasked = Boolean(debug);
+        info.vendor = source.getParameter(debug ? debug.UNMASKED_VENDOR_WEBGL : source.VENDOR);
+        info.renderer = source.getParameter(debug ? debug.UNMASKED_RENDERER_WEBGL : source.RENDERER);
+      }
+    } catch (error) {
+      info.error = textOf(error);
+    }
+    for (var i = 0; i < probes.length; i++) releaseContext(probes[i]);
+    return info;
+  }
+
+  function canvasInfo() {
+    var element = document.querySelector('canvas');
+    if (!element) return null;
+    return {
+      width: element.width,
+      height: element.height,
+      cssWidth: Math.round(element.clientWidth),
+      cssHeight: Math.round(element.clientHeight),
+      pixelRatio: null,
+    };
+  }
+
+  function diagnostics() {
+    try {
+      return {
+        time: new Date().toISOString(),
+        userAgent: navigator.userAgent,
+        devicePixelRatio: window.devicePixelRatio || 1,
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+        webgl: webglInfo(null),
+        canvas: canvasInfo(),
+        three: null,
+        rhino3dm: { version: null, worker: 'unknown' },
+        boot: { started: state.started, booted: state.booted, failure: state.failure },
+        model: null,
+        logs: logs.slice(),
+      };
+    } catch (error) {
+      return { error: textOf(error), logs: logs.slice() };
+    }
+  }
+
+  // ---------------------------------------------------------------------------------
+  // Failure detection
+  // ---------------------------------------------------------------------------------
+
+  window.addEventListener('error', function (event) {
+    var target = event ? event.target : null;
+    if (target && target !== window && target.tagName) {
+      var tag = String(target.tagName).toUpperCase();
+      var stylesheet = tag === 'LINK' && String(target.rel || '').toLowerCase() === 'stylesheet';
+      if (tag !== 'SCRIPT' && !stylesheet) return;
+      fail('The 3D viewer could not load its files', (tag === 'SCRIPT' ? 'script ' : 'stylesheet ') + (target.src || target.href || '(inline)'));
+      return;
+    }
+    var message = (event && event.message) || textOf(event && event.error) || 'unknown error';
+    if (BENIGN_ERROR.test(message)) return;
+    var where = event && event.filename ? ' (' + event.filename + ':' + event.lineno + ')' : '';
+    fail('The 3D viewer hit an error', message + where);
+  }, true);
+
+  window.addEventListener('unhandledrejection', function (event) {
+    fail('The 3D viewer hit an error', textOf(event && event.reason) || 'unhandled promise rejection');
+  });
+
+  function checkStarted() {
+    if (state.booted || state.failure) return;
+    if (state.started) {
+      fail('The 3D viewer did not finish starting', 'viewer.js stopped before the viewer was ready.');
+    } else {
+      fail(
+        'The 3D viewer could not start',
+        'viewer.js did not run: this browser could not load the page scripts (no module or import-map support, or a file is missing).',
+      );
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', function () {
+    var queued = pending;
+    pending = [];
+    addBackdrop();
+    for (var i = 0; i < queued.length; i++) queued[i]();
+    // Module scripts run before DOMContentLoaded, so a module that never signalled
+    // `starting` never ran at all.
+    if (!state.started) checkStarted();
+  });
+  setTimeout(checkStarted, BOOT_TIMEOUT_MS);
+
+  // ---------------------------------------------------------------------------------
+  // Stand-in API until viewer.js installs the real one
+  // ---------------------------------------------------------------------------------
+
+  function failureText() {
+    if (!state.failure) return 'The 3D viewer did not start';
+    return state.failure.detail ? state.failure.title + ': ' + state.failure.detail : state.failure.title;
+  }
+
+  function noop() {}
+
+  window.viewer = {
+    load: function (options) {
+      emit('loadResult', { ok: false, name: (options && options.name) || 'model.3dm', error: failureText() });
+    },
+    clear: noop,
+    fit: noop,
+    setView: noop,
+    setProjection: noop,
+    setDisplayMode: noop,
+    setLayerVisible: noop,
+    setAllLayersVisible: noop,
+    setCurvesVisible: noop,
+    setPointsVisible: noop,
+    setGrid: noop,
+    setBackground: noop,
+    exportGlb: function () {
+      emit('exportResult', { ok: false, error: failureText() });
+    },
+    getStats: function () {
+      return 'null';
+    },
+    diagnostics: diagnostics,
+  };
+
+  window.__viewerBoot = {
+    emit: emit,
+    log: log,
+    fail: fail,
+    notice: notice,
+    clearNotice: function () {
+      hideOverlay('notice');
+    },
+    contentShown: contentShown,
+    diagnostics: diagnostics,
+    webglInfo: webglInfo,
+    starting: function () {
+      state.started = true;
+    },
+    booted: function () {
+      state.booted = true;
+    },
+    state: state,
+  };
+})();
+</script>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="./viewer.css">
 <script type="importmap">

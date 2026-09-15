@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- AppColors.bg (lib/app/theme.dart): the window behind the Flutter UI. -->
+    <color name="app_background">#0E1013</color>
+</resources>

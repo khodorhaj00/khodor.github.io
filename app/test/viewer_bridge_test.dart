@@ -137,6 +137,38 @@ void main() {
     });
   });
 
+  group('diagnostics', () {
+    test(
+      'asks the page defensively, so a missing function is not an error',
+      () async {
+        runner.nextResult = 'renderer: WebGL2';
+        expect(await bridge.diagnostics(), 'renderer: WebGL2');
+        final source = runner.sources.single;
+        expect(source, contains('window.viewer'));
+        expect(
+          source,
+          contains('typeof v.diagnostics !== "function"'),
+          reason: 'a page without diagnostics() answers null',
+        );
+        expect(
+          source,
+          contains('catch'),
+          reason: 'a throwing page answers too',
+        );
+      },
+    );
+
+    test(
+      'returns null when the page has no diagnostics, JSON otherwise',
+      () async {
+        runner.nextResult = null;
+        expect(await bridge.diagnostics(), isNull);
+        runner.nextResult = {'renderer': 'WebGL2'};
+        expect(await bridge.diagnostics(), '{"renderer":"WebGL2"}');
+      },
+    );
+  });
+
   group('events', () {
     test('viewerReady', () async {
       final future = bridge.onReady.first;
@@ -198,6 +230,19 @@ void main() {
       expect((await export).error, 'empty scene');
       expect((await log).level, ViewerLogLevel.warn);
       expect((await log).message, 'hello');
+    });
+
+    // The page keeps running until the platform WebView is really gone. A
+    // throw here would reject its callHandler promise rather than surface.
+    test('events arriving after dispose are dropped, not thrown', () {
+      bridge.dispose();
+      for (final name in runner.handlers.keys) {
+        expect(
+          () => runner.handlers[name]!([<String, dynamic>{}]),
+          returnsNormally,
+          reason: name,
+        );
+      }
     });
   });
 }

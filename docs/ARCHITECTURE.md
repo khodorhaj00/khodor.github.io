@@ -48,6 +48,14 @@ Page files: `index.html`, `viewer.css`, `viewer.js`, `PATCHES.md`.
 * `index.html` uses an import map:
   `{"imports":{"three":"./vendor/three/three.module.js","three/addons/":"./vendor/three/addons/"}}`
   and loads `viewer.js` as `type="module"`. No external URLs anywhere (offline app).
+* **Start-up guard**: `index.html` opens with an inline ES5 script, first in the document, that
+  runs before anything else can fail. It owns the Flutter bridge of §2.2 (so failures before
+  `viewer.js` runs are still reported), the ring buffer behind `viewer.diagnostics()`, an opaque
+  backdrop, the failure screen (`#viewer-overlay`) and a stand-in `window.viewer`. `viewer.js`
+  depends on it: it calls `window.__viewerBoot.starting()` on its first executable line, builds
+  the renderer inside `try`/`catch`, and reports whether a model is drawn. Consequences: do not
+  load `viewer.js` from any other host page, and do not give it a top-level `await` — the guard
+  tells "the module never ran" from "it ran and stopped" by the `DOMContentLoaded` ordering.
 * `Rhino3dmLoader.setLibraryPath('./vendor/rhino3dm/')`. The loader fetches `rhino3dm.js` +
   `rhino3dm.wasm` and runs decoding in a Blob Web Worker (needs an http(s) origin — provided by
   the Android `WebViewAssetLoader`, see §3). `setWorkerLimit(1)` (phones), `setSubdivisionLevel(2)`.
@@ -118,6 +126,7 @@ All methods are synchronous or return a Promise; all results are reported throug
 | `viewer.setBackground(hexTop, hexBottom)` | Optional; defaults above. |
 | `viewer.exportGlb()` | GLTFExporter binary of the visible model, Y-up (rotate −90° about X on a root group copy). Emits `exportResult`. |
 | `viewer.getStats()` | Returns the last `Stats` object as a JSON **string** (or `"null"`). |
+| `viewer.diagnostics()` | Synchronous, never throws, JSON-serialisable snapshot for a bug report: `{ time, userAgent, devicePixelRatio, viewport:{width,height}, webgl:{webgl1, webgl2, vendor, renderer, unmasked, version, maxTextureSize, contextLost, error}, canvas:{width,height,cssWidth,cssHeight,pixelRatio}\|null, three:'r186'\|null, rhino3dm:{version, worker:'pending'\|'ready'\|'failed'\|'unknown'}, boot:{started, booted, failure:{title,detail}\|null}, model:{name,objects,meshes,triangles,vertices,layers,unmeshed,units,bbox}\|null, logs:[{level,message,t}] }`. `logs` is the last 30 `log` events, `t` in ms since page load. Answered by the stand-in API too, so a page that failed to start still reports why in `boot.failure`. |
 
 ### 2.2 Events — JS → Flutter
 
@@ -133,6 +142,14 @@ When it does not (desktop browser, Playwright tests) it pushes `{name, payload}`
 | `exportResult` | `{ ok: true, filename, base64 }` or `{ ok: false, error }` |
 | `objectPicked` | `{ id, name, objectType, blockName, layerIndex, layerName, userStrings: {k: v}, size: [dx,dy,dz], center: [x,y,z] }` or `null`. `blockName` is `''` unless the hit lies inside a block instance; then the payload describes the top-level instance (`objectType: 'InstanceReference'`, `blockName` = definition name, size/center of the whole instance). |
 | `log` | `{ level: 'info'|'warn'|'error', message }` |
+
+Every start-up failure (WebGL refused, a script/stylesheet/import-map target that does not load,
+`rhino3dm` initialisation), every uncaught error, every unhandled rejection and a lost WebGL
+context emit `log` at level `error`. They also paint a full-screen, opaque, readable message in
+the page — except while a model is already drawn, which is not a blank page: there the app shows
+the `log` error over the working view instead of taking it away. While start-up has failed the
+stand-in `window.viewer` answers every call of §2.1, so `load()` emits `loadResult { ok: false,
+error }` and `exportGlb()` emits `exportResult { ok: false, error }` instead of staying silent.
 
 `Stats`:
 ```json
@@ -176,7 +193,15 @@ Node + Playwright, no Flutter needed. `package.json` (devDependency `playwright@
    * `exportGlb()` on `meshes.3dm` → base64 decodes to bytes starting with `glTF` magic, JSON
      chunk parses, `meshes.length > 0`.
    * Layer toggle: `setLayerVisible(idx('PARTS'), false)` → screenshot differs from before.
-5. Exit non-zero on any failure; print a compact table of timings per fixture.
+5. Hostile-WebView cases, each on its own page: `getContext` forced to fail, `viewer.js` aborted,
+   `three.module.js` aborted (the import-map target), a forced context loss and restore
+   (`WEBGL_lose_context`), a zero `window.innerWidth`, the `viewer.diagnostics()` shape, the
+   opaque background, and an uncaught error / unhandled rejection both with and without a model
+   on screen. Each asserts what the user would see: the painted screen covers the page, is on top
+   (`elementFromPoint`), is opaque dark with readable text, names the failure, emits the `log`
+   error, does not emit `viewerReady`, and answers `load()` — while a model on screen is left
+   drawn and uncovered.
+6. Exit non-zero on any failure; print a compact table of timings per fixture.
 
 ## 3. Flutter app (`/app`)
 
@@ -197,14 +222,30 @@ InAppWebView(
       InternalStoragePathHandler(path: '/files/', directory: modelsDir.path), // our model files
     ]),
     allowFileAccess: false, allowContentAccess: false, javaScriptEnabled: true,
-    mediaPlaybackRequiresUserGesture: false, transparentBackground: true,
+    mediaPlaybackRequiresUserGesture: false,
+    transparentBackground: false,          // opaque: see below
+    hardwareAcceleration: true,            // LAYER_TYPE_HARDWARE; WebGL draws nothing without it
+    forceDark: ForceDark.OFF, algorithmicDarkeningAllowed: false,
+    safeBrowsingEnabled: false,            // every byte the page loads is local
+    useOnRenderProcessGone: true,
     supportZoom: false, overScrollMode: OverScrollMode.NEVER,
     verticalScrollBarEnabled: false, horizontalScrollBarEnabled: false,
     useHybridComposition: true,
   ),
+  initialUserScripts: [ /* AT_DOCUMENT_START: documentElement.style.backgroundColor = '#0E1013' */ ],
   onWebViewCreated: (c) { register handlers of §2.2 with c.addJavaScriptHandler(...) },
 )
 ```
+The WebView is **opaque**. `transparentBackground: true` is the plugin's only background lever
+(native: `setBackgroundColor(TRANSPARENT)`), and a transparent WebView composited into the Flutter
+view tree is a known source of flat grey frames on Android. flutter_inappwebview 6.1.5 exposes no
+Android background colour, so the dark colour is painted by the document itself through the
+document-start user script, before `viewer.css` is even fetched. Android's two darkening levers
+are pinned off so the app's dark theme cannot wash the page out; both are already the plugin
+defaults, pinned so they cannot drift. The Android window is dark in every configuration
+(`values/colors.xml`, `LaunchTheme`/`NormalTheme` on `Theme.Black.NoTitleBar` with
+`android:isLightTheme=false`, which is also what the WebView reads for the page's
+`prefers-color-scheme`), so there is no `values-night/` variant and no white flash.
 Never set `disableVerticalScroll` / `disableHorizontalScroll`: on Android the plugin implements them
 by swallowing every touch-move event before Chromium sees it, which kills orbit, pan and pinch-zoom;
 the page blocks scrolling itself (`viewer.css`: `overflow: hidden`, `touch-action: none`).
@@ -213,9 +254,25 @@ Model URL passed to JS: `https://appassets.androidplatform.net/files/<fileName>`
 `<fileName>` is a file inside `modelsDir`. Fallback if the URL fetch fails (`loadResult.error`
 matching the fetch texts of §2.2 — never for parse/build failures, which would only fail again):
 `base64`, tried once per file and only for files up to 25 MB, since the inline path holds several
-copies of the bytes in memory. The `viewerReady` handshake has a 20 s watchdog armed when the
-page's `onLoadStop` fires; *Retry* after any error recreates the platform WebView (new widget
-key) instead of reloading it, because a crashed render process cannot be reloaded.
+copies of the bytes in memory.
+
+Readiness is tracked as stages (`lib/features/viewer/viewer_status.dart`), each with its own
+budget: *Creating the view* 10 s · *Loading the viewer page* 15 s · *Viewer page loaded* 20 s
+(the `viewerReady` handshake) · *Viewer ready* 15 s · *Reading the file* 30 s · *Parsing the
+model* 120 s · *Building the scene* 60 s. The watchdog is armed when the platform view is
+created, not at `onLoadStop`, and re-armed by every stage change and every progress update, so a
+slow-but-live parse is never killed while a silent page is caught in seconds. On expiry the page
+says which stage stalled and offers *Retry* and *Diagnostics*. `onReceivedError`,
+`onReceivedHttpError`, `onConsoleMessage` at error level and `onRenderProcessGone` all reach the
+user as readable text (main-frame failures as the error panel, the rest as the overlay's problem
+line or a SnackBar once the model is up). *Retry* recreates the platform WebView (new widget key)
+instead of reloading it, because a crashed render process cannot be reloaded; callbacks from the
+outgoing WebView are ignored so they cannot fail the new attempt.
+
+**Overlay invariant**: exactly one opaque cover is on screen whenever the model is not
+(`ViewerOverlay.resolve`: error > busy > progress), and the *none* case is only reachable with
+`stats != null`. A blank, grey or otherwise dead WebView can therefore never pass for a working
+app, whatever the cause.
 
 ### 3.2 Storage & cache
 
@@ -258,12 +315,18 @@ Kotlin rejects anything whose bytes do not start with the `.3dm` magic (toast + 
   recents list (name, size, relative date, `MESHED` badge, tap to open, swipe to delete).
   Drop hint text: "Also opens from Files, WhatsApp, Drive via *Open with*".
 * **Viewer**: full-screen WebView; top overlay bar: back, file name, chips `objects` `tris`,
-  overflow menu (Export GLB, Share original, Info). Bottom toolbar: Fit · Views (popup) ·
+  overflow menu (Export GLB, Share original, Info, Diagnostics — the last always enabled, since
+  the report matters most when there is no model and nothing else to look at: it shows
+  `viewer.diagnostics()` next to the asset and model URLs, recorded vs on-disk file size, the
+  stage timeline with timings, engine versions and the recent event log, with one-tap Copy).
+  Bottom toolbar: Fit · Views (popup) ·
   Display mode (popup) · Layers (bottom sheet: checkbox + color swatch + count; all/none) ·
   Grid toggle · Ortho toggle. Loading overlay with phase + progress bar. Banner when
   `unmeshed.total > 0`: "N objects have no render mesh" + `Mesh on server` (if backend URL
   configured; runs `/mesh`, saves `.meshed.3dm`, reloads) or `Set up server` (→ settings) and a
-  hint "or re-save in Rhino with Save small unchecked". While `/mesh` runs the banner is replaced
+  hint "or re-save in Rhino with Save small unchecked". The loading overlay names the stage
+  reached, the file, a determinate bar where a fraction exists and the last error reported.
+  While `/mesh` runs the banner is replaced
   by a meshing banner (upload progress, then "waiting for Rhino.Compute", `Cancel` aborts the
   request) and the model stays usable underneath. When the `.meshed` copy is what is on screen
   and still reports unmeshed objects, the banner says the server could not mesh them and offers
@@ -294,7 +357,9 @@ lib/core/services/backend_client.dart   health/mesh/convert over an injectable h
 lib/core/services/settings_service.dart
 lib/core/services/intent_service.dart   MethodChannel wrapper
 lib/features/home/home_page.dart
-lib/features/viewer/viewer_page.dart (+ widgets/: toolbar, layers_sheet, stats_sheet, picked_card, unmeshed_banner, meshing_banner, loading_overlay)
+lib/features/viewer/viewer_page.dart (+ widgets/: toolbar, layers_sheet, stats_sheet, picked_card, unmeshed_banner, meshing_banner, loading_overlay, error_panel, diagnostics_sheet)
+lib/features/viewer/viewer_status.dart  stages, watchdog, event log, overlay invariant — pure Dart, unit tested
+lib/features/viewer/diagnostics_report.dart  the copyable report — pure Dart, unit tested
 lib/features/settings/settings_page.dart
 lib/app/format.dart                counts, bytes, lengths, unit symbols, relative dates (no intl)
 test/                             unit tests for models, viewer events, format, file_service and

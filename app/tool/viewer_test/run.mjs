@@ -97,6 +97,9 @@ const failures = [];
 let checks = 0;
 // Set while a test deliberately requests a missing file; Chromium logs the 404 as a console error.
 let expectResourceError = false;
+// Set while a test deliberately throws on the page: console and page errors matching it are
+// the point of the test, not a failure of it.
+let expectedErrorPattern = null;
 
 function check(condition, message) {
   checks += 1;
@@ -249,6 +252,52 @@ function checkFramed(signature, label) {
   check(
     inside && Math.max(fillX, fillY) >= MIN_FIT_FILL,
     `${label}: drawn ${(fillX * 100).toFixed(0)}% x ${(fillY * 100).toFixed(0)}% of ${width}x${height}, x[${bounds.minX},${bounds.maxX}] y[${bounds.minY},${bounds.maxY}] (>= ${(MIN_FIT_FILL * 100).toFixed(0)}% on one axis, no edge touched)`,
+  );
+}
+
+// The failure screen index.html paints: whether it is up, how much of the viewport it
+// covers, what it says, whether it really is on top (not hidden behind the canvas) and
+// whether it is legible — light text on an opaque dark background at a readable size.
+async function overlayState(page) {
+  return page.evaluate(() => {
+    const element = document.getElementById('viewer-overlay');
+    if (!element) return null;
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    const rgba = (color) => {
+      const parts = (String(color).match(/[\d.]+/g) || []).map(Number);
+      return {
+        luminance: 0.2126 * parts[0] + 0.7152 * parts[1] + 0.0722 * parts[2],
+        alpha: parts.length > 3 ? parts[3] : 1,
+      };
+    };
+    const centre = document.elementFromPoint(Math.round(window.innerWidth / 2), Math.round(window.innerHeight / 2));
+    return {
+      visible: style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0,
+      coverage: (rect.width * rect.height) / (window.innerWidth * window.innerHeight),
+      text: element.innerText.replace(/\s+/g, ' ').trim(),
+      background: rgba(style.backgroundColor),
+      foreground: rgba(style.color),
+      fontSize: parseFloat(style.fontSize),
+      onTop: Boolean(centre && (centre === element || element.contains(centre))),
+    };
+  });
+}
+
+async function checkFailureScreen(page, label, pattern) {
+  const overlay = await overlayState(page);
+  if (!overlay) {
+    check(false, `${label}: a message is painted on the page`);
+    return;
+  }
+  check(
+    overlay.visible && overlay.onTop && overlay.coverage > 0.99,
+    `${label}: message covers the page (${(overlay.coverage * 100).toFixed(0)}%, on top: ${overlay.onTop})`,
+  );
+  check(pattern.test(overlay.text), `${label}: message names the failure "${overlay.text.slice(0, 120)}"`);
+  check(
+    overlay.background.alpha === 1 && overlay.background.luminance < 60 && overlay.foreground.luminance > 120 && overlay.fontSize >= 12,
+    `${label}: message is readable (opaque background ${overlay.background.luminance.toFixed(0)}, text ${overlay.foreground.luminance.toFixed(0)}, ${overlay.fontSize}px)`,
   );
 }
 
@@ -734,6 +783,7 @@ async function testBase64Load(page) {
 async function testClear(page) {
   await page.evaluate(() => window.viewer.clear());
   checkEqual(await page.evaluate(() => window.viewer.getStats()), 'null', 'clear: getStats() is "null"');
+  checkEqual(await page.evaluate(() => window.viewer.diagnostics().model), null, 'clear: diagnostics model is null');
   await settle(page);
   const signature = await frameSignature(page);
   checkEqual(signature.drawn, 0, 'clear: nothing drawn');
@@ -781,10 +831,286 @@ async function testInitFailure(browser, port) {
   const logged = events.find((e) => e.name === 'log' && e.payload.level === 'error').payload.message;
   check(/rhino3dm initialisation failed/.test(logged) && /Out of memory/.test(logged), `init failure: log error "${logged}"`);
   check(!events.some((e) => e.name === 'viewerReady'), 'init failure: viewerReady not emitted');
+  await checkFailureScreen(page, 'init failure', /rhino3dm/i);
   const result = await loadModel(page, { url: '/backend/test/fixtures/meshes.3dm', name: 'meshes.3dm' }, false);
   check(result.ok === false && /rhino3dm failed to initialise/.test(result.error), `init failure: load() fails instead of hanging (${result.error})`);
   checkEqual(pageErrors.length, 0, `init failure: uncaught page errors ${JSON.stringify(pageErrors)}`);
   await context.close();
+}
+
+
+// ---------------------------------------------------------------------------------------
+// Hostile WebView: nothing may fail silently
+// ---------------------------------------------------------------------------------------
+
+const STARTUP_FAILURES = [
+  {
+    label: 'no WebGL',
+    file: 'fail_no_webgl.png',
+    // Every WebGL context request refused, as on a WebView with no usable GPU path.
+    install: (page) => page.addInitScript(() => {
+      const getContext = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = function (type, attributes) {
+        return /^(webgl|experimental-webgl)/.test(String(type)) ? null : getContext.call(this, type, attributes);
+      };
+    }),
+    pattern: /WebGL/i,
+    extra: (diagnostics) => check(
+      diagnostics.webgl.webgl1 === false && diagnostics.webgl.webgl2 === false,
+      `no WebGL: diagnostics report no WebGL (webgl1 ${diagnostics.webgl.webgl1}, webgl2 ${diagnostics.webgl.webgl2})`,
+    ),
+  },
+  {
+    label: 'module script missing',
+    file: 'fail_no_module.png',
+    install: (page) => page.route('**/viewer.js', (route) => route.abort()),
+    pattern: /viewer\.js|could not (start|load)/i,
+  },
+  {
+    label: 'import map target missing',
+    file: 'fail_no_three.png',
+    install: (page) => page.route('**/vendor/three/three.module.js', (route) => route.abort()),
+    pattern: /three\.module\.js|could not (start|load)/i,
+  },
+];
+
+// A page that cannot start must say so on screen and to the app, and must still answer
+// viewer calls instead of leaving the app waiting for an event that can never arrive.
+async function testStartupFailure(browser, port, scenario) {
+  const context = await browser.newContext({ viewport: PORTRAIT, deviceScaleFactor: 1 });
+  const page = await context.newPage();
+  page.setDefaultTimeout(120000);
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await scenario.install(page);
+  await page.goto(`http://127.0.0.1:${port}${VIEWER_PATH}`);
+  await page.waitForFunction(() => (window.__viewerEvents || []).some((e) => e.name === 'log' && e.payload.level === 'error'));
+  const events = await page.evaluate(() => window.__viewerEvents);
+  const logged = events.find((e) => e.name === 'log' && e.payload.level === 'error').payload.message;
+  check(scenario.pattern.test(logged), `${scenario.label}: log error "${logged}"`);
+  check(!events.some((e) => e.name === 'viewerReady'), `${scenario.label}: viewerReady not emitted`);
+  await checkFailureScreen(page, scenario.label, scenario.pattern);
+
+  const from = await eventCount(page);
+  await page.evaluate(() => window.viewer.load({ url: '/backend/test/fixtures/meshes.3dm', name: 'meshes.3dm' }));
+  const result = (await eventsSince(page, from)).find((e) => e.name === 'loadResult');
+  check(
+    result && result.payload.ok === false && typeof result.payload.error === 'string' && result.payload.error.length > 10,
+    `${scenario.label}: load() answers (${result ? JSON.stringify(result.payload.error) : 'no loadResult'})`,
+  );
+  const diagnostics = await page.evaluate(() => window.viewer.diagnostics());
+  check(
+    diagnostics.boot.booted === false && diagnostics.boot.failure !== null,
+    `${scenario.label}: diagnostics carry the failure (${JSON.stringify(diagnostics.boot.failure && diagnostics.boot.failure.title)})`,
+  );
+  if (scenario.extra) scenario.extra(diagnostics);
+  checkEqual(pageErrors.length, 0, `${scenario.label}: uncaught page errors ${JSON.stringify(pageErrors)}`);
+  await page.screenshot({ path: path.join(outDir, scenario.file) });
+  await context.close();
+}
+
+// A lost context is exactly the phone symptom that started this: a frozen canvas that
+// still looks like a working app. It must be announced, and the page must come back.
+async function testContextLoss(browser, port) {
+  const context = await browser.newContext({ viewport: LANDSCAPE, deviceScaleFactor: 1 });
+  const page = await context.newPage();
+  page.setDefaultTimeout(120000);
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.goto(`http://127.0.0.1:${port}${VIEWER_PATH}`);
+  await page.waitForFunction(() => (window.__viewerEvents || []).some((e) => e.name === 'viewerReady'));
+  await loadModel(page, { url: '/backend/test/fixtures/meshes.3dm', name: 'meshes.3dm' });
+  const before = await frameSignature(page);
+
+  const from = await eventCount(page);
+  const lost = await page.evaluate(() => {
+    const gl = document.querySelector('canvas').getContext('webgl2');
+    const extension = gl && gl.getExtension('WEBGL_lose_context');
+    if (!extension) return false;
+    window.__loseContext = extension;
+    extension.loseContext();
+    return true;
+  });
+  check(lost, 'context loss: WEBGL_lose_context available');
+  if (!lost) {
+    await context.close();
+    return;
+  }
+  await page.waitForFunction(
+    (start) => window.__viewerEvents.slice(start).some((e) => e.name === 'log' && e.payload.level === 'error' && /context lost/i.test(e.payload.message)),
+    from,
+  );
+  const logged = (await eventsSince(page, from)).find((e) => e.name === 'log' && e.payload.level === 'error');
+  check(Boolean(logged), `context loss: log error "${logged ? logged.payload.message : 'none'}"`);
+  await checkFailureScreen(page, 'context loss', /interrupted|graphics context/i);
+  await page.screenshot({ path: path.join(outDir, 'fail_context_lost.png') });
+
+  // Switching the view while the context is lost draws nothing (three.js skips rendering);
+  // if the frame after the restore shows the new view, it really was drawn again rather
+  // than left over in the preserved drawing buffer.
+  const restoredFrom = await eventCount(page);
+  await page.evaluate(() => window.viewer.setView('top'));
+  await page.evaluate(() => window.__loseContext.restoreContext());
+  await page.waitForFunction(
+    (start) => window.__viewerEvents.slice(start).some((e) => e.name === 'log' && /context restored/i.test(e.payload.message)),
+    restoredFrom,
+  );
+  await settle(page);
+  const after = await frameSignature(page);
+  check(
+    after.drawn / after.total > BLANK_THRESHOLD && after.hash !== before.hash,
+    `context restored: ${after.drawn} pixels drawn again in the new view (was ${before.drawn} in the old one)`,
+  );
+  const overlay = await overlayState(page);
+  check(overlay !== null && !overlay.visible, `context restored: message cleared (${overlay ? 'hidden' : 'no message element'})`);
+  checkEqual(pageErrors.length, 0, `context loss: uncaught page errors ${JSON.stringify(pageErrors)}`);
+  await context.close();
+}
+
+// A WebView that reports window.innerWidth/innerHeight as 0 (the platform view is measured
+// after the page loads) must still size its canvas and draw, not sit at 0x0 forever.
+async function testZeroViewport(browser, port) {
+  const context = await browser.newContext({ viewport: PORTRAIT, deviceScaleFactor: 1 });
+  const page = await context.newPage();
+  page.setDefaultTimeout(120000);
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, get: () => 0 });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, get: () => 0 });
+  });
+  await page.goto(`http://127.0.0.1:${port}${VIEWER_PATH}`);
+  await page.waitForFunction(() => (window.__viewerEvents || []).some((e) => e.name === 'viewerReady'));
+  await loadModel(page, { url: '/backend/test/fixtures/meshes.3dm', name: 'meshes.3dm' });
+  const signature = await modelSignature(page);
+  check(
+    signature.width === PORTRAIT.width && signature.height === PORTRAIT.height,
+    `zero innerWidth: canvas is ${signature.width}x${signature.height} (expected ${PORTRAIT.width}x${PORTRAIT.height})`,
+  );
+  check(signature.drawn / signature.total > BLANK_THRESHOLD, `zero innerWidth: ${signature.drawn} pixels drawn`);
+  checkFramed(signature, 'zero innerWidth');
+  checkEqual(pageErrors.length, 0, `zero innerWidth: uncaught page errors ${JSON.stringify(pageErrors)}`);
+  await context.close();
+}
+
+// viewer.diagnostics(): the documented shape, JSON-serialisable, cheap and never throwing.
+async function testDiagnostics(page, expected) {
+  const diagnostics = await page.evaluate(() => window.viewer.diagnostics());
+  check(typeof diagnostics.userAgent === 'string' && /Chrome/.test(diagnostics.userAgent), `diagnostics: userAgent ${JSON.stringify(diagnostics.userAgent)}`);
+  checkEqual(diagnostics.three, 'r186', 'diagnostics: three');
+  checkEqual(diagnostics.rhino3dm.version, '8.32.2', 'diagnostics: rhino3dm version');
+  checkEqual(diagnostics.rhino3dm.worker, 'ready', 'diagnostics: rhino3dm worker');
+  check(diagnostics.webgl.webgl1 === true && diagnostics.webgl.webgl2 === true, `diagnostics: webgl1 ${diagnostics.webgl.webgl1}, webgl2 ${diagnostics.webgl.webgl2}`);
+  check(
+    typeof diagnostics.webgl.renderer === 'string' && diagnostics.webgl.renderer.length > 0,
+    `diagnostics: renderer ${JSON.stringify(diagnostics.webgl.renderer)} (unmasked ${diagnostics.webgl.unmasked})`,
+  );
+  check(typeof diagnostics.webgl.maxTextureSize === 'number' && diagnostics.webgl.maxTextureSize > 0, `diagnostics: maxTextureSize ${diagnostics.webgl.maxTextureSize}`);
+  checkEqual(diagnostics.webgl.contextLost, false, 'diagnostics: contextLost');
+  checkEqual(diagnostics.devicePixelRatio, 1, 'diagnostics: devicePixelRatio');
+  check(
+    diagnostics.canvas.width === LANDSCAPE.width && diagnostics.canvas.height === LANDSCAPE.height && diagnostics.canvas.pixelRatio === 1,
+    `diagnostics: canvas ${JSON.stringify(diagnostics.canvas)}`,
+  );
+  check(
+    diagnostics.boot.started === true && diagnostics.boot.booted === true && diagnostics.boot.failure === null,
+    `diagnostics: boot ${JSON.stringify(diagnostics.boot)}`,
+  );
+  check(
+    Array.isArray(diagnostics.logs) && diagnostics.logs.length <= 30
+      && diagnostics.logs.every((e) => typeof e.level === 'string' && typeof e.message === 'string' && typeof e.t === 'number'),
+    `diagnostics: logs ${JSON.stringify(diagnostics.logs.length)} entries (<= 30)`,
+  );
+  check(
+    diagnostics.model && diagnostics.model.objects === expected.objects && diagnostics.model.triangles === expected.triangles
+      && diagnostics.model.units === expected.units && diagnostics.model.layers === expected.layers.length,
+    `diagnostics: model ${JSON.stringify(diagnostics.model)}`,
+  );
+  check(JSON.stringify(diagnostics).length > 200, 'diagnostics: JSON-serialisable');
+  // Cheap: repeated calls must not pile up canvases or leak WebGL contexts.
+  const canvases = await page.evaluate(() => {
+    for (let i = 0; i < 5; i++) window.viewer.diagnostics();
+    return document.querySelectorAll('canvas').length;
+  });
+  checkEqual(canvases, 1, 'diagnostics: no canvas left behind');
+}
+
+// The page paints its own opaque dark background: when the canvas draws nothing the user
+// must still see the viewer's background, never the bare host view behind it.
+async function testOpaqueBackground(page) {
+  const background = await page.evaluate(() => {
+    const parse = (color) => (String(color).match(/[\d.]+/g) || []).map(Number);
+    const backdrop = document.getElementById('viewer-backdrop');
+    const canvas = document.querySelector('canvas');
+    const rect = backdrop.getBoundingClientRect();
+    return {
+      covers: rect.width >= window.innerWidth && rect.height >= window.innerHeight,
+      backdrop: parse(getComputedStyle(backdrop).backgroundColor),
+      body: parse(getComputedStyle(document.body).backgroundColor),
+      canvasOnTop: document.elementFromPoint(Math.round(window.innerWidth / 2), Math.round(window.innerHeight / 2)) === canvas,
+      canvasAfterBackdrop: (backdrop.compareDocumentPosition(canvas) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+    };
+  });
+  const opaqueDark = (color) => color.length >= 3 && (color.length < 4 || color[3] === 1)
+    && 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2] < 60;
+  check(background.covers && opaqueDark(background.backdrop), `background: backdrop ${JSON.stringify(background.backdrop)} covers the page`);
+  check(opaqueDark(background.body), `background: body ${JSON.stringify(background.body)}`);
+  check(background.canvasOnTop && background.canvasAfterBackdrop, 'background: the canvas draws over the backdrop');
+}
+
+// A drawn model is not a blank page: an error while one is on screen is reported, but the
+// failure screen must not take the working view away from the user (the app shows the `log`
+// error over it instead). Leaves the page with nothing loaded, as it found it.
+async function testErrorOverModel(page) {
+  await loadModel(page, { url: '/backend/test/fixtures/meshes.3dm', name: 'meshes.3dm' });
+  await settle(page);
+  const before = await frameSignature(page);
+  const from = await eventCount(page);
+  await page.evaluate(() => { setTimeout(() => { throw new Error('synthetic error over a model'); }, 0); });
+  await page.waitForFunction(
+    (start) => window.__viewerEvents.slice(start).some(
+      (e) => e.name === 'log' && e.payload.level === 'error' && e.payload.message.includes('synthetic error over a model'),
+    ),
+    from,
+  );
+  await settle(page);
+  const overlay = await overlayState(page);
+  check(!overlay || !overlay.visible, `error over a model: not painted over (${overlay ? overlay.text.slice(0, 40) : 'no overlay'})`);
+  const after = await frameSignature(page);
+  check(after.drawn === before.drawn && after.hash === before.hash, `error over a model: model still drawn (${after.drawn} px)`);
+  check(
+    (await page.evaluate(() => window.viewer.diagnostics().boot.failure)) !== null,
+    'error over a model: diagnostics still carry the failure',
+  );
+  await page.evaluate(() => window.viewer.clear());
+}
+
+// An uncaught error or an unhandled rejection anywhere on the page must paint and report,
+// instead of leaving a viewer that looks fine while it is broken. Runs last on this page:
+// it leaves the failure screen up.
+async function testRuntimeErrors(page) {
+  expectedErrorPattern = /synthetic/;
+  await testErrorOverModel(page);
+  const cases = [
+    ['uncaught error', () => { setTimeout(() => { throw new Error('synthetic uncaught failure'); }, 0); }, 'synthetic uncaught failure'],
+    ['unhandled rejection', () => { Promise.reject(new Error('synthetic rejected promise')); }, 'synthetic rejected promise'],
+  ];
+  for (const [label, trigger, needle] of cases) {
+    const from = await eventCount(page);
+    await page.evaluate(trigger);
+    await page.waitForFunction(
+      ([start, text]) => window.__viewerEvents.slice(start).some(
+        (e) => e.name === 'log' && e.payload.level === 'error' && e.payload.message.includes(text),
+      ),
+      [from, needle],
+    );
+    const overlay = await overlayState(page);
+    check(
+      overlay && overlay.visible && overlay.text.includes(needle),
+      `${label}: reported and painted "${overlay ? overlay.text.slice(0, 90) : 'nothing'}"`,
+    );
+  }
+  expectedErrorPattern = null;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -804,12 +1130,17 @@ async function main() {
     const page = await context.newPage();
     page.setDefaultTimeout(120000);
     await installImageLoadCounter(page);
-    page.on('pageerror', (error) => check(false, `page error: ${error.message}`));
+    page.on('pageerror', (error) => {
+      if (expectedErrorPattern && expectedErrorPattern.test(error.message)) return;
+      check(false, `page error: ${error.message}`);
+    });
     page.on('console', (message) => {
       const text = message.text();
       if (text.startsWith('[viewer-event]')) {
         if (process.env.VERBOSE) console.log('  ' + text);
-      } else if (message.type() === 'error' && !(expectResourceError && text.startsWith('Failed to load resource'))) {
+      } else if (message.type() === 'error'
+        && !(expectResourceError && text.startsWith('Failed to load resource'))
+        && !(expectedErrorPattern && expectedErrorPattern.test(text))) {
         check(false, `console error: ${text}`);
       } else if (message.type() === 'warning' && process.env.VERBOSE) {
         console.log('  console.warn: ' + text);
@@ -840,6 +1171,8 @@ async function main() {
       console.log('\n== interaction (meshes.3dm)');
       await loadModel(page, { url: '/backend/test/fixtures/meshes.3dm', name: 'meshes.3dm' });
       await testGetStats(page, meshesStats);
+      await testDiagnostics(page, meshesStats);
+      await testOpaqueBackground(page);
       await testExport(page);
       await testLayerToggle(page, meshesStats);
       await testCurvesAndPoints(page);
@@ -854,9 +1187,15 @@ async function main() {
       await testBadLoad(page);
       await testCorruptLoad(page);
       await testClear(page);
+      console.log('\n== runtime errors');
+      await testRuntimeErrors(page);
     }
     console.log('\n== worker initialisation failure');
     await testInitFailure(browser, port);
+    console.log('\n== hostile WebView');
+    for (const scenario of STARTUP_FAILURES) await testStartupFailure(browser, port, scenario);
+    await testContextLoss(browser, port);
+    await testZeroViewport(browser, port);
   } finally {
     await browser.close();
     server.close();

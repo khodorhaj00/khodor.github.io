@@ -1,9 +1,14 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhino_viewer/app/theme.dart';
 import 'package:rhino_viewer/core/bridge/viewer_bridge.dart';
 import 'package:rhino_viewer/core/models/model_stats.dart';
 import 'package:rhino_viewer/core/models/viewer_events.dart';
+import 'package:rhino_viewer/features/viewer/widgets/diagnostics_sheet.dart';
+import 'package:rhino_viewer/features/viewer/widgets/error_panel.dart';
 import 'package:rhino_viewer/features/viewer/widgets/layers_sheet.dart';
 import 'package:rhino_viewer/features/viewer/widgets/loading_overlay.dart';
 import 'package:rhino_viewer/features/viewer/widgets/meshing_banner.dart';
@@ -597,4 +602,130 @@ void main() {
       0.4,
     );
   });
+
+  testWidgets('LoadingOverlay names the stage, the file and the last error', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      host(
+        const Stack(
+          children: [
+            LoadingOverlay(
+              label: 'Parsing the model',
+              detail: 'KIOSK information-1.3dm',
+              problem: 'Page error: WebGL is not available',
+              opaque: true,
+            ),
+          ],
+        ),
+      ),
+    );
+    expect(find.text('Parsing the model'), findsOneWidget);
+    expect(find.text('KIOSK information-1.3dm'), findsOneWidget);
+    expect(find.text('Page error: WebGL is not available'), findsOneWidget);
+    expect(
+      tester
+          .widget<LinearProgressIndicator>(find.byType(LinearProgressIndicator))
+          .value,
+      isNull,
+      reason: 'an unmeasured stage spins instead of claiming 0 %',
+    );
+    expect(
+      tester.widget<ColoredBox>(_firstBox(find.byType(LoadingOverlay))).color,
+      AppColors.bg,
+      reason: 'an opaque overlay is what hides a blank or grey WebView',
+    );
+  });
+
+  testWidgets('ViewerErrorPanel states the failure and offers a way out', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    var retry = 0;
+    var diagnostics = 0;
+    var back = 0;
+    await tester.pumpWidget(
+      host(
+        Stack(
+          children: [
+            ViewerErrorPanel(
+              message:
+                  'The 3D engine did not start. Nothing happened for 20 s at '
+                  '"Viewer page loaded".',
+              onRetry: () => retry++,
+              onDiagnostics: () => diagnostics++,
+              onBack: () => back++,
+            ),
+          ],
+        ),
+      ),
+    );
+    expect(find.text('Could not display this file'), findsOneWidget);
+    expect(find.textContaining('The 3D engine did not start'), findsOneWidget);
+    expect(
+      tester.widget<ColoredBox>(_firstBox(find.byType(ViewerErrorPanel))).color,
+      AppColors.bg,
+    );
+    await tester.tap(find.text('Retry'));
+    await tester.tap(find.text('Diagnostics'));
+    await tester.tap(find.text('Back'));
+    expect([retry, diagnostics, back], [1, 1, 1]);
+  });
+
+  testWidgets('DiagnosticsSheet waits for the page, then copies in one tap', (
+    tester,
+  ) async {
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final calls = <MethodCall>[];
+    messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      calls.add(call);
+      return null;
+    });
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+    final report = Completer<String>();
+    await tester.pumpWidget(host(DiagnosticsSheet(report: report.future)));
+    expect(find.text('Collecting…'), findsOneWidget);
+    expect(
+      tester
+          .widget<FilledButton>(find.widgetWithText(FilledButton, 'Copy'))
+          .onPressed,
+      isNull,
+      reason: 'nothing to copy yet',
+    );
+
+    report.complete('Rhino Viewer diagnostics\nStage     Parsing the model');
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Stage     Parsing the model'), findsOneWidget);
+
+    await tester.tap(find.text('Copy'));
+    await tester.pumpAndSettle();
+    final copied = calls.where((c) => c.method == 'Clipboard.setData');
+    expect(copied, hasLength(1));
+    expect(
+      (copied.single.arguments as Map)['text'],
+      contains('Rhino Viewer diagnostics'),
+    );
+    expect(find.text('Diagnostics copied'), findsOneWidget);
+  });
+
+  testWidgets('DiagnosticsSheet shows why it has nothing to show', (
+    tester,
+  ) async {
+    // Completed after the sheet is listening: an error future nobody has
+    // attached to yet is reported to the zone instead of to the builder.
+    final report = Completer<String>();
+    await tester.pumpWidget(host(DiagnosticsSheet(report: report.future)));
+    report.completeError('no WebView is running');
+    await tester.pumpAndSettle();
+    expect(find.textContaining('no WebView is running'), findsOneWidget);
+  });
 }
+
+/// The outermost [ColoredBox] of a widget: its backdrop.
+Finder _firstBox(Finder of) =>
+    find.descendant(of: of, matching: find.byType(ColoredBox)).first;

@@ -3,6 +3,18 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { Rhino3dmLoader } from 'three/addons/loaders/3DMLoader.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 
+// ---------------------------------------------------------------------------------------
+// Start-up guard (installed by index.html before this module loads)
+// ---------------------------------------------------------------------------------------
+
+// It owns the Flutter bridge, the ring buffer of log events and the failure screen, so
+// anything that goes wrong before, during or after start-up is both visible on screen and
+// reported to the app. Signal that this module body is running before anything that can
+// throw, so the guard can tell "never ran" from "ran and stopped".
+const bootstrap = window.__viewerBoot;
+bootstrap.starting();
+const { emit, log } = bootstrap;
+
 const RHINO3DM_VERSION = '8.32.2';
 const HIGHLIGHT_COLOR = 0xFFB020;
 const HIGHLIGHT_INTENSITY = 0.35;
@@ -35,28 +47,6 @@ const VIEW_DIRECTIONS = {
 };
 const DISPLAY_MODES = ['shaded', 'shaded_edges', 'wireframe', 'ghosted'];
 const MESH_TYPES = new Set(['Mesh', 'Brep', 'Extrusion', 'SubD']);
-
-// ---------------------------------------------------------------------------------------
-// Flutter bridge
-// ---------------------------------------------------------------------------------------
-
-function emit(name, payload) {
-  const bridge = window.flutter_inappwebview;
-  if (bridge && typeof bridge.callHandler === 'function') {
-    bridge.callHandler(name, payload);
-    return;
-  }
-  (window.__viewerEvents ||= []).push({ name, payload });
-  // Keep the console line readable: a GLB payload can be tens of MB of base64.
-  const logged = payload && typeof payload.base64 === 'string'
-    ? { ...payload, base64: `<${payload.base64.length} chars>` }
-    : payload;
-  console.log('[viewer-event] ' + JSON.stringify({ name, payload: logged }));
-}
-
-function log(level, message) {
-  emit('log', { level, message });
-}
 
 // ---------------------------------------------------------------------------------------
 // Loader: stock loader minus file materials, plus full (nested) block-instance expansion
@@ -133,12 +123,27 @@ const loader = new ViewerLoader()
 // Renderer, scene, cameras, controls
 // ---------------------------------------------------------------------------------------
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setClearColor(0x000000, 0);
-document.body.appendChild(renderer.domElement);
-const canvas = renderer.domElement;
+let renderer = null;
+let canvas = null;
+
+// The canvas is created here rather than inside WebGLRenderer so that the browser's own
+// `webglcontextcreationerror` reason — the useful half of the message on a phone — can be
+// captured and shown when the context is refused.
+function createRenderer() {
+  const element = document.createElement('canvas');
+  let reason = '';
+  element.addEventListener('webglcontextcreationerror', (event) => {
+    reason = event.statusMessage || '';
+  }, false);
+  try {
+    const created = new THREE.WebGLRenderer({ canvas: element, antialias: true, alpha: true, preserveDrawingBuffer: true });
+    created.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    created.setClearColor(0x000000, 0);
+    return created;
+  } catch (error) {
+    throw new Error(`WebGL is unavailable in this browser: ${errorMessage(error)}${reason ? ` (${reason})` : ''}`);
+  }
+}
 
 const scene = new THREE.Scene();
 
@@ -191,8 +196,20 @@ function applyControlLimits(radius) {
   controls.maxZoom = 100;
 }
 
+// A WebView can hand the page a zero-sized or late-sized viewport (hybrid composition
+// measures the platform view after the page has loaded), which would leave a 0x0 canvas
+// drawing nothing at all; every size is clamped to at least 1 px and re-applied from a
+// ResizeObserver as well as from `resize`.
+function viewportWidth() {
+  return Math.max(1, Math.round(window.innerWidth || document.documentElement.clientWidth || 0));
+}
+
+function viewportHeight() {
+  return Math.max(1, Math.round(window.innerHeight || document.documentElement.clientHeight || 0));
+}
+
 function aspect() {
-  return Math.max(1, window.innerWidth) / Math.max(1, window.innerHeight);
+  return viewportWidth() / viewportHeight();
 }
 
 function setOrthoFrustum(halfHeight) {
@@ -239,8 +256,16 @@ function updateClipPlanes() {
   camera.updateProjectionMatrix();
 }
 
-window.addEventListener('resize', () => {
-  renderer.setSize(window.innerWidth, window.innerHeight);
+let appliedWidth = 0;
+let appliedHeight = 0;
+
+function applyViewportSize() {
+  const width = viewportWidth();
+  const height = viewportHeight();
+  if (width === appliedWidth && height === appliedHeight) return;
+  appliedWidth = width;
+  appliedHeight = height;
+  renderer.setSize(width, height);
   persp.aspect = aspect();
   persp.updateProjectionMatrix();
   setOrthoFrustum(ortho.top);
@@ -248,16 +273,34 @@ window.addEventListener('resize', () => {
   // rather than crop: the whole model stays in view at the price of the current zoom.
   fit();
   requestRender();
-});
+}
 
-canvas.addEventListener('webglcontextlost', (event) => {
+// A lost context leaves a frozen canvas that looks exactly like a working app, so it is
+// said on screen and in the log. three.js rebuilds its GL state on restore by itself; the
+// page only has to draw again.
+function onContextLost(event) {
+  // Without preventDefault the browser never restores the context.
   event.preventDefault();
   log('error', 'WebGL context lost');
-});
-canvas.addEventListener('webglcontextrestored', () => {
+  bootstrap.notice('The 3D view was interrupted', 'The device took the graphics context (WebGL) away from this page.');
+}
+
+function onContextRestored() {
   log('info', 'WebGL context restored');
+  bootstrap.clearNotice();
   requestRender();
-});
+}
+
+function attachCanvasListeners() {
+  canvas.addEventListener('webglcontextlost', onContextLost, false);
+  canvas.addEventListener('webglcontextrestored', onContextRestored, false);
+}
+
+function observeViewport() {
+  window.addEventListener('resize', applyViewportSize);
+  // `resize` alone can miss a platform view that is measured after the page loaded.
+  if (typeof ResizeObserver === 'function') new ResizeObserver(applyViewportSize).observe(document.documentElement);
+}
 
 // ---------------------------------------------------------------------------------------
 // Materials (per colour, shared) and display modes
@@ -648,14 +691,14 @@ let pointerDown = null;
 let activePointers = 0;
 let multiTouch = false;
 
-canvas.addEventListener('pointerdown', (event) => {
+function onPointerDown(event) {
   activePointers += 1;
   if (activePointers > 1) multiTouch = true;
   else {
     multiTouch = false;
     pointerDown = { x: event.clientX, y: event.clientY, t: performance.now() };
   }
-});
+}
 
 function endPointer(event, allowPick) {
   activePointers = Math.max(0, activePointers - 1);
@@ -666,8 +709,11 @@ function endPointer(event, allowPick) {
   if (moved < TAP_MAX_MOVE_PX && performance.now() - down.t < TAP_MAX_MS) pickAt(event.clientX, event.clientY);
 }
 
-canvas.addEventListener('pointerup', (event) => endPointer(event, true));
-canvas.addEventListener('pointercancel', (event) => endPointer(event, false));
+function attachPointerListeners() {
+  canvas.addEventListener('pointerdown', onPointerDown);
+  canvas.addEventListener('pointerup', (event) => endPointer(event, true));
+  canvas.addEventListener('pointercancel', (event) => endPointer(event, false));
+}
 
 function pickAt(clientX, clientY) {
   const rect = canvas.getBoundingClientRect();
@@ -890,6 +936,8 @@ async function load(options) {
     if (stats.unmeshed.total > 0) {
       log('warn', `${stats.unmeshed.total} object(s) have no render mesh and were skipped`);
     }
+    // There is now something on screen, so a later error is reported without covering it.
+    bootstrap.contentShown(true);
     emit('loadResult', { ok: true, name: displayName, stats });
   } catch (error) {
     const message = errorMessage(error);
@@ -1048,6 +1096,7 @@ function clear() {
   modelCenter = new THREE.Vector3();
   modelRadius = 1;
   gridRadius = 0;
+  bootstrap.contentShown(false);
   requestRender();
 }
 
@@ -1118,70 +1167,143 @@ async function exportGlb() {
 }
 
 // ---------------------------------------------------------------------------------------
+// Diagnostics
+// ---------------------------------------------------------------------------------------
+
+// A cheap, never-throwing snapshot for a bug report: what the WebView really handed the
+// page (WebGL support, the driver's own renderer string, the canvas being drawn into),
+// how far start-up got, the last log events and what is loaded. Shape in ARCHITECTURE.md.
+function diagnostics() {
+  const info = bootstrap.diagnostics();
+  try {
+    info.three = 'r' + THREE.REVISION;
+    info.rhino3dm = { version: RHINO3DM_VERSION, worker: workerState };
+    if (renderer) {
+      info.webgl = bootstrap.webglInfo(renderer.getContext());
+      if (info.canvas) info.canvas.pixelRatio = renderer.getPixelRatio();
+    }
+    info.model = stats && {
+      name: modelName,
+      objects: stats.objects,
+      meshes: stats.meshes,
+      triangles: stats.triangles,
+      vertices: stats.vertices,
+      layers: stats.layers.length,
+      unmeshed: stats.unmeshed.total,
+      units: stats.units,
+      bbox: stats.bbox,
+    };
+  } catch (error) {
+    info.error = errorMessage(error);
+  }
+  return info;
+}
+
+// ---------------------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------------------
 
-window.viewer = Object.freeze({
-  load,
-  clear,
-  fit,
-  setView,
-  setProjection,
-  setDisplayMode(mode) {
-    if (!DISPLAY_MODES.includes(mode)) {
-      log('warn', `Unknown display mode "${mode}"`);
-      return;
-    }
-    displayMode = mode;
-    applyDisplayMode();
-    requestRender();
-  },
-  setLayerVisible(index, visible) {
-    if (index < 0 || index >= layerVisible.length) return;
-    layerVisible[index] = Boolean(visible);
-    applyVisibility();
-  },
-  setAllLayersVisible(visible) {
-    layerVisible = layerVisible.map(() => Boolean(visible));
-    applyVisibility();
-  },
-  setCurvesVisible(visible) {
-    curvesVisible = Boolean(visible);
-    applyVisibility();
-  },
-  setPointsVisible(visible) {
-    pointsVisible = Boolean(visible);
-    applyVisibility();
-  },
-  setGrid(visible) {
-    gridVisible = Boolean(visible);
-    if (grid) grid.visible = gridVisible;
-    requestRender();
-  },
-  setBackground(hexTop, hexBottom) {
-    const style = document.documentElement.style;
-    if (hexTop) style.setProperty('--bg-top', hexTop);
-    if (hexBottom) style.setProperty('--bg-bottom', hexBottom);
-  },
-  exportGlb,
-  getStats() {
-    return stats ? JSON.stringify(stats) : 'null';
-  },
-});
+function installApi() {
+  window.viewer = Object.freeze({
+    load,
+    clear,
+    fit,
+    setView,
+    setProjection,
+    setDisplayMode(mode) {
+      if (!DISPLAY_MODES.includes(mode)) {
+        log('warn', `Unknown display mode "${mode}"`);
+        return;
+      }
+      displayMode = mode;
+      applyDisplayMode();
+      requestRender();
+    },
+    setLayerVisible(index, visible) {
+      if (index < 0 || index >= layerVisible.length) return;
+      layerVisible[index] = Boolean(visible);
+      applyVisibility();
+    },
+    setAllLayersVisible(visible) {
+      layerVisible = layerVisible.map(() => Boolean(visible));
+      applyVisibility();
+    },
+    setCurvesVisible(visible) {
+      curvesVisible = Boolean(visible);
+      applyVisibility();
+    },
+    setPointsVisible(visible) {
+      pointsVisible = Boolean(visible);
+      applyVisibility();
+    },
+    setGrid(visible) {
+      gridVisible = Boolean(visible);
+      if (grid) grid.visible = gridVisible;
+      requestRender();
+    },
+    setBackground(hexTop, hexBottom) {
+      const style = document.documentElement.style;
+      if (hexTop) style.setProperty('--bg-top', hexTop);
+      if (hexBottom) style.setProperty('--bg-bottom', hexBottom);
+    },
+    exportGlb,
+    getStats() {
+      return stats ? JSON.stringify(stats) : 'null';
+    },
+    diagnostics,
+  });
+}
 
 // ---------------------------------------------------------------------------------------
-// Start-up: frame an empty unit scene, then fetch rhino3dm and spawn the decode worker.
-// The worker's `_ready` (patched loader, see PATCHES.md) settles once rhino3dm is
-// instantiated inside it, so viewerReady means the first load only pays for parsing, and
-// an initialisation failure fails every load() instead of hanging it.
+// Start-up
 // ---------------------------------------------------------------------------------------
 
-createControls();
-const unitBox = new THREE.Box3(new THREE.Vector3(-1, -1, -1), new THREE.Vector3(1, 1, 1));
-framePoints(new THREE.Vector3(), modelRadius, (fn) => boxCorners(unitBox, fn));
-const workerReady = loader._initLibrary()
-  .then(() => loader._getWorker(0))
-  .then((worker) => worker._ready);
-workerReady
-  .then(() => emit('viewerReady', { three: 'r' + THREE.REVISION, rhino3dm: RHINO3DM_VERSION }))
-  .catch((error) => log('error', `rhino3dm initialisation failed: ${errorMessage(error)}`));
+let workerReady = null;
+let workerState = 'pending';
+
+// Fetches rhino3dm and spawns the decode worker. The worker's `_ready` (patched loader,
+// see PATCHES.md) settles once rhino3dm is instantiated inside it, so viewerReady means
+// the first load only pays for parsing, and an initialisation failure fails every load()
+// instead of hanging it.
+function startRhino3dm() {
+  workerReady = loader._initLibrary()
+    .then(() => loader._getWorker(0))
+    .then((worker) => worker._ready);
+  workerReady
+    .then(() => {
+      workerState = 'ready';
+      emit('viewerReady', { three: 'r' + THREE.REVISION, rhino3dm: RHINO3DM_VERSION });
+    })
+    .catch((error) => {
+      workerState = 'failed';
+      bootstrap.fail('3D files cannot be opened on this device', `rhino3dm initialisation failed: ${errorMessage(error)}`);
+    });
+}
+
+// Everything that needs a GPU context. Nothing above this point touches WebGL, so any
+// failure here is painted and reported instead of leaving a blank document behind.
+function startViewer() {
+  renderer = createRenderer();
+  canvas = renderer.domElement;
+  document.body.appendChild(canvas);
+  attachCanvasListeners();
+  attachPointerListeners();
+  observeViewport();
+  createControls();
+  applyViewportSize();
+  if (appliedWidth <= 1 || appliedHeight <= 1) {
+    log('warn', `The page has no size yet (${appliedWidth}x${appliedHeight} px); waiting for a resize`);
+  }
+  // Frame an empty unit scene, so an empty viewer still has a usable camera.
+  const unitBox = new THREE.Box3(new THREE.Vector3(-1, -1, -1), new THREE.Vector3(1, 1, 1));
+  framePoints(new THREE.Vector3(), modelRadius, (fn) => boxCorners(unitBox, fn));
+  installApi();
+  bootstrap.booted();
+  startRhino3dm();
+}
+
+try {
+  startViewer();
+} catch (error) {
+  bootstrap.fail('The 3D viewer could not start', errorMessage(error));
+}

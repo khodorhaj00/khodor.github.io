@@ -14,6 +14,10 @@ abstract final class AppColors {
   static const Color onAccent = Color(0xFF14110A);
 }
 
+/// `#RRGGBB` for [color], for the CSS the WebView is handed.
+String cssHex(Color color) =>
+    '#${(color.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}';
+
 /// 8 px grid.
 const double kGap = 8;
 
