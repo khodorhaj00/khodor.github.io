@@ -1,0 +1,21 @@
+{
+  "name": "rhino-appserver",
+  "version": "1.0.0",
+  "description": "Meshing / glTF conversion service for Rhino .3dm files, in front of Rhino.Compute",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "dependencies": {
+    "compute-rhino3d": "0.13.0-beta",
+    "express": "^5.1.0",
+    "rhino3dm": "8.32.2"
+  }
+}

@@ -1,0 +1,2 @@
+three.js r186 (0.186.0) — MIT — https://github.com/mrdoob/three.js
+Files: build/three.module.js, build/three.core.js, examples/jsm/controls/OrbitControls.js, examples/jsm/loaders/3DMLoader.js (patched, see PATCHES.md), examples/jsm/exporters/GLTFExporter.js

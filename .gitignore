@@ -1,0 +1,21 @@
+# Flutter/Android build outputs are covered by app/.gitignore.
+
+# Backend
+backend/node_modules/
+backend/.env
+
+# Viewer Playwright harness
+app/tool/viewer_test/node_modules/
+app/tool/viewer_test/out/
+
+# Release signing material: never commit
+*.jks
+*.keystore
+key.properties
+
+# Local environment files
+.env
+
+# OS clutter
+.DS_Store
+Thumbs.db

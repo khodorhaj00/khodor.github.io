@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The app is dark whatever the OS setting is (ARCHITECTURE.md §3.4), so
+         there is no values-night variant: these styles apply to both. A dark
+         window means no white flash before Flutter's first frame, and WebView
+         reads android:isLightTheme to decide the page's prefers-color-scheme,
+         which must agree with the viewer page's own dark styling. -->
+    <style name="LaunchTheme" parent="@android:style/Theme.Black.NoTitleBar">
+        <!-- Shown while the process starts; removed when Flutter draws. -->
+        <item name="android:windowBackground">@drawable/launch_background</item>
+        <item name="android:colorBackground">@color/app_background</item>
+        <item name="android:isLightTheme">false</item>
+    </style>
+    <!-- Applied as soon as the process has started, and the colour behind the
+         Flutter UI from then on. -->
+    <style name="NormalTheme" parent="@android:style/Theme.Black.NoTitleBar">
+        <item name="android:windowBackground">@color/app_background</item>
+        <item name="android:colorBackground">@color/app_background</item>
+        <item name="android:isLightTheme">false</item>
+    </style>
+</resources>

@@ -1,0 +1,39 @@
+:root {
+  --bg-top: #1B1F26;
+  --bg-bottom: #0E1013;
+  color-scheme: dark;
+}
+
+/* The page paints its own opaque dark background instead of relying on being composited
+   over the app: if the canvas ever draws nothing (no WebGL, a lost context), the user sees
+   this, never the host view behind it. index.html also inserts #viewer-backdrop, styled
+   inline with the same gradient, so the background survives this stylesheet not loading. */
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--bg-bottom);
+  /* Renderer clears to transparent; the gradient behind it is the page background. */
+  background-image: linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+canvas {
+  display: block;
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  /* Above #viewer-backdrop, below the failure screen. */
+  z-index: 1;
+  touch-action: none;
+  outline: none;
+}

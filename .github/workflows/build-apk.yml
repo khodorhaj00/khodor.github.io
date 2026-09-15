@@ -1,0 +1,232 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+    paths:
+      - 'app/**'
+      - 'backend/test/fixtures/**'
+      - 'samples/**'
+      - '.github/workflows/build-apk.yml'
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'backend/test/fixtures/**'
+      - 'samples/**'
+      - '.github/workflows/build-apk.yml'
+  workflow_dispatch:
+
+# A newer push to the same branch/PR cancels the run it supersedes; tag builds are never cancelled.
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  apk:
+    name: Flutter analyze, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: app
+    env:
+      # The secrets context cannot be used in a step-level `if`, so the presence of the
+      # keystore is resolved here into a plain job env var and steps test that instead.
+      HAS_KEYSTORE: ${{ secrets.KEYSTORE_BASE64 != '' }}
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+      signed: ${{ steps.meta.outputs.signed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Set up Flutter 3.47.4
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.4
+          channel: stable
+          cache: true
+
+      - name: Version and commit metadata
+        id: meta
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          full="$(grep -m1 -E '^version:' pubspec.yaml | sed -E 's/^version:[[:space:]]*//; s/[[:space:]]+#.*$//; s/[[:space:]]+$//')"
+          version="${full%%+*}"
+          if [ -z "$version" ]; then
+            echo "::error file=app/pubspec.yaml::could not parse 'version:' from pubspec.yaml"
+            exit 1
+          fi
+          if [ "$IS_TAG" = 'true' ] && [ "$REF_NAME" != "v$version" ]; then
+            echo "::error file=app/pubspec.yaml::tag $REF_NAME does not match pubspec version $version - bump 'version:' in app/pubspec.yaml and re-tag"
+            exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "short_sha=${GITHUB_SHA::7}"
+            echo "signed=$HAS_KEYSTORE"
+          } >> "$GITHUB_OUTPUT"
+          echo "pubspec version $full, commit ${GITHUB_SHA::7}, release keystore: $HAS_KEYSTORE"
+
+      - name: flutter pub get
+        run: flutter pub get
+
+      - name: flutter analyze
+        run: flutter analyze --fatal-infos
+
+      - name: flutter test
+        run: flutter test
+
+      - name: Install release keystore
+        if: env.HAS_KEYSTORE == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          for name in KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::secret $name is empty but KEYSTORE_BASE64 is set - all four signing secrets are required"
+              exit 1
+            fi
+            # key.properties is read by java.util.Properties as ISO-8859-1: a newline, control
+            # or non-ASCII character reaches Gradle altered while keytool (below) still accepts it.
+            if [ "$(printf '%s' "${!name}" | LC_ALL=C tr -d '\040-\176' | wc -c)" -ne 0 ]; then
+              echo "::error::secret $name contains a newline, control or non-ASCII character - signing secrets must be printable ASCII"
+              exit 1
+            fi
+          done
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > android/app/upload-keystore.jks
+          # Properties treats '\' as an escape and drops whitespace in front of a value.
+          properties_value() { local v=${1//\\/\\\\}; case $v in ' '*) v="\\$v" ;; esac; printf '%s' "$v"; }
+          printf 'storeFile=upload-keystore.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$(properties_value "$KEYSTORE_PASSWORD")" "$(properties_value "$KEY_ALIAS")" \
+            "$(properties_value "$KEY_PASSWORD")" > android/key.properties
+          # Fails here, with a readable message, rather than deep inside Gradle.
+          keytool -list -keystore android/app/upload-keystore.jks -storepass:env KEYSTORE_PASSWORD -alias "$KEY_ALIAS" > /dev/null
+          echo "release keystore installed, alias '$KEY_ALIAS'"
+
+      - name: No release keystore
+        if: env.HAS_KEYSTORE != 'true'
+        run: |
+          echo "::warning title=Unsigned build::KEYSTORE_BASE64 is not set - the APKs are signed with the debug key and cannot update a release-signed install. See README.md, 'Signing keystore for CI'."
+
+      - name: Build split-per-ABI APKs
+        run: flutter build apk --release --split-per-abi
+
+      - name: Build universal APK
+        run: flutter build apk --release
+
+      - name: Collect and rename APKs
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
+        run: |
+          out=build/app/outputs/flutter-apk
+          mkdir -p dist
+          for abi in armeabi-v7a arm64-v8a x86_64; do
+            cp "$out/app-$abi-release.apk" "dist/rhino-viewer-$VERSION-$SHORT_SHA-$abi.apk"
+          done
+          cp "$out/app-release.apk" "dist/rhino-viewer-$VERSION-$SHORT_SHA-universal.apk"
+          (cd dist && sha256sum ./*.apk > SHA256SUMS.txt)
+          ls -l dist
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: rhino-viewer-apk-${{ steps.meta.outputs.short_sha }}
+          path: |
+            app/dist/*.apk
+            app/dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+          # A re-run inside the same workflow run replaces the earlier attempt's artifact
+          # instead of failing on the name conflict.
+          overwrite: true
+
+  release:
+    name: GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    # The APK ships the viewer page the harness checks, so a red harness blocks the release.
+    needs: [apk, viewer]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download APKs
+        uses: actions/download-artifact@v4
+        with:
+          name: rhino-viewer-apk-${{ needs.apk.outputs.short_sha }}
+          path: dist
+
+      - name: Create release and attach APKs
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Rhino Viewer ${{ github.ref_name }}
+          files: |
+            dist/*.apk
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            Rhino Viewer ${{ needs.apk.outputs.version }} (commit ${{ needs.apk.outputs.short_sha }}).
+            Signing: ${{ needs.apk.outputs.signed == 'true' && 'release upload key' || 'DEBUG key (no KEYSTORE_BASE64 secret configured)' }}.
+
+            Install `rhino-viewer-*-arm64-v8a.apk` on current phones; `universal` runs on any ABI.
+            Stay on one variant across updates: per-ABI APKs carry version code 1000 × ABI index + N, the universal APK plain N, so Android treats a switch (e.g. arm64-v8a → universal) as a downgrade. Uninstall first for that, and when switching between debug-signed and release-signed builds.
+
+  viewer:
+    name: Viewer page (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: app/tool/viewer_test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/tool/viewer_test/package-lock.json
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run viewer harness
+        run: node run.mjs
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: viewer-screenshots-${{ github.sha }}
+          path: app/tool/viewer_test/out/*.png
+          if-no-files-found: warn
+          retention-days: 14
+          overwrite: true
