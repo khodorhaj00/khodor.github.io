@@ -303,6 +303,21 @@ test/                             unit tests for models, viewer events, format, 
                                   HomePage, SettingsPage and the viewer widgets.
 ```
 
+### 3.6a Android build toolchain (pinned)
+
+`app/android/settings.gradle.kts` pins AGP to **8.11.1** and the wrapper to **Gradle 8.14.3**, below
+the AGP 9.1 / Gradle 9.3 the Flutter 3.47 template generates. AGP 9 removed
+`getDefaultProguardFile('proguard-android.txt')`; `flutter_inappwebview_android` 1.1.3 still calls it
+in its own `android/build.gradle`, so Gradle fails while *evaluating* that project and no release APK
+can be produced, regardless of this app's own minify settings. Only the plugin's `1.2.0-beta` line
+fixes it, and that beta changes 75 files of the Android WebView implementation plus the platform
+interface, which is too much untested churn in the component the whole app runs on.
+
+Flutter 3.47 errors below AGP 8.11.1 and Gradle 8.14.0, so these are the newest versions that both
+satisfy Flutter and keep the stable plugin. `android.newDsl` is removed from `gradle.properties`
+because it only exists in AGP 9. Do not bump AGP back to 9 until `flutter_inappwebview` ships a
+stable release with the fix; the build breaks immediately if you do.
+
 ### 3.6 Signing (`android/app/build.gradle.kts`)
 
 Read `android/key.properties` if present (`storeFile`, `storePassword`, `keyAlias`,

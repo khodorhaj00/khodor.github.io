@@ -75,8 +75,15 @@ unrelated to the app and untouched; everything for the viewer lives in `app/`, `
 
 ## Build locally
 
-Flutter 3.47.4 (stable), Android SDK with platform 36 and build-tools, JDK 17 or 21 (Gradle 9.3 /
-AGP 9.1). No iOS target.
+Flutter 3.47.4 (stable), Android SDK with platform 36 and build-tools, JDK 17 or 21 (Gradle 8.14 /
+AGP 8.11). No iOS target.
+
+The Android Gradle Plugin is pinned to the 8.x line on purpose. AGP 9 dropped support for
+`getDefaultProguardFile('proguard-android.txt')`, which `flutter_inappwebview_android` 1.1.3 still
+calls in its own build file, so every release build fails while Gradle evaluates that project. The
+fix exists only in the plugin's `1.2.0-beta` line, which rewrites most of the WebView
+implementation this app depends on. Flutter 3.47 supports AGP down to 8.11.1, so the pin stays
+inside the supported range. See the comment in `app/android/settings.gradle.kts`.
 
 ```sh
 cd app
