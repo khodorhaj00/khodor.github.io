@@ -142,5 +142,16 @@ void main() {
       expect(picked.layerIndex, -1);
       expect(picked.displayName, 'Mesh');
     });
+
+    test('carries the block name of a hit inside a block instance', () {
+      final instance = PickedObject.fromJson({
+        'objectType': 'InstanceReference',
+        'blockName': 'unit_box',
+      });
+      expect(instance.blockName, 'unit_box');
+      // An unnamed instance is titled by its block rather than by its type.
+      expect(instance.displayName, 'unit_box');
+      expect(PickedObject.fromJson({'objectType': 'Mesh'}).blockName, '');
+    });
   });
 }

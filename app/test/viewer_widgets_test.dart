@@ -367,17 +367,20 @@ void main() {
     });
   });
 
-  PickedObject pickedObject({Map<String, String> userStrings = const {}}) =>
-      PickedObject.fromJson({
-        'id': '1',
-        'name': 'Bracket',
-        'objectType': 'Brep',
-        'layerIndex': 0,
-        'layerName': 'PARTS',
-        'userStrings': userStrings,
-        'size': [10, 20.5, 30],
-        'center': [0, 0, 0],
-      });
+  PickedObject pickedObject({
+    Map<String, String> userStrings = const {},
+    String blockName = '',
+  }) => PickedObject.fromJson({
+    'id': '1',
+    'name': 'Bracket',
+    'objectType': 'Brep',
+    'blockName': blockName,
+    'layerIndex': 0,
+    'layerName': 'PARTS',
+    'userStrings': userStrings,
+    'size': [10, 20.5, 30],
+    'center': [0, 0, 0],
+  });
 
   group('PickedCard', () {
     testWidgets('shows type, layer, size with a unit symbol and user strings', (
@@ -395,6 +398,7 @@ void main() {
       );
       expect(find.text('Bracket'), findsOneWidget);
       expect(find.text('Brep'), findsOneWidget);
+      expect(find.text('Block'), findsNothing);
       expect(find.text('PARTS'), findsOneWidget);
       expect(find.text('10 × 20.5 × 30 mm'), findsOneWidget);
       expect(find.text('material'), findsOneWidget);
@@ -409,6 +413,22 @@ void main() {
         host(PickedCard(object: pickedObject(), units: 'None', onClose: () {})),
       );
       expect(find.text('10 × 20.5 × 30'), findsOneWidget);
+    });
+
+    testWidgets('names the block of a hit inside a block instance', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        host(
+          PickedCard(
+            object: pickedObject(blockName: 'unit_box'),
+            units: 'Millimeters',
+            onClose: () {},
+          ),
+        ),
+      );
+      expect(find.text('Block'), findsOneWidget);
+      expect(find.text('unit_box'), findsOneWidget);
     });
 
     testWidgets('keeps the close button on screen and scrolls many strings', (

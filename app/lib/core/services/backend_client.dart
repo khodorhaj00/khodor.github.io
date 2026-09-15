@@ -265,16 +265,43 @@ class BackendClient {
             ..._headers(apiKey),
             HttpHeaders.contentTypeHeader: 'application/octet-stream',
           });
-    final response = await _guard(
-      () => _client
-          .send(request)
-          .then(http.Response.fromStream)
-          .timeout(meshTimeout),
-      cancel: cancel,
-    );
+    final http.Response response;
+    try {
+      response = await _guard(
+        () => _client
+            .send(request)
+            .then(http.Response.fromStream)
+            .timeout(meshTimeout),
+        cancel: cancel,
+      );
+    } on BackendException catch (e) {
+      // The appserver refuses an oversize body from its Content-Length with
+      // 413 + `Connection: close` and drops the socket while the phone is
+      // still sending. dart:io then reports the failed write rather than the
+      // response already in its buffer (HttpClientRequest.done waits on both
+      // with eagerError), so the 413 itself never reaches this code.
+      if (e.code == 'network' && _uploadCutPattern.hasMatch(e.detail)) {
+        final mb = (body.length / (1 << 20)).toStringAsFixed(1);
+        throw BackendException(
+          statusCode: 0,
+          code: 'upload_rejected',
+          detail:
+              'The server closed the connection while the file ($mb MB) was '
+              'being uploaded; this is how it refuses a file above its '
+              'MAX_UPLOAD_MB limit',
+        );
+      }
+      rethrow;
+    }
     _throwIfError(response);
     return response;
   }
+
+  // dart:io / package:http texts for a socket the peer closed mid-write.
+  static final RegExp _uploadCutPattern = RegExp(
+    r'Write failed|Broken pipe|Connection reset|closed while sending',
+    caseSensitive: false,
+  );
 
   Map<String, String> _headers(String? apiKey) => {
     if (apiKey != null && apiKey.isNotEmpty) 'X-Api-Key': apiKey,

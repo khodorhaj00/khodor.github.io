@@ -65,10 +65,13 @@ unrelated to the app and untouched; everything for the viewer lives in `app/`, `
   which is preferred on open.
 * Viewer: one finger orbits, two fingers pan/zoom. Bottom bar: *Fit* · *Views* (Iso, Top, Bottom,
   Front, Back, Left, Right — Rhino conventions, Z-up) · *Display* (Shaded, Shaded + edges, Wireframe,
-  Ghosted) · *Layers* (checkbox, colour, object count, all/none) · *Grid* · *Ortho*. Tap an object for
-  its name, layer, size in model units and user strings. Overflow menu: *Export GLB* (Y-up, shares the
-  file), *Share original*, *Info* (stats, timings, warnings). Materials from the file are ignored on
-  purpose: colour is the object colour when the colour source is *by object*, otherwise the layer colour.
+  Ghosted) · *Layers* (checkbox, colour, object count, search, all/none) · *Grid* · *Ortho*. Tap an
+  object for its name, layer, size in model units and user strings (a part inside a block reports the
+  block instance and its block name, as Rhino selects it); objects hidden in Rhino stay hidden. Overflow
+  menu: *Export GLB* (Y-up, shares the file), *Share original*, *Info* (stats, timings, warnings).
+  Materials from the file are ignored on purpose: colour is the object colour when the colour source is
+  *by object*, otherwise the layer colour; near-black colours (Rhino's default layer is black) are
+  lightened on screen so parts do not vanish against the dark background — exports keep the file colour.
 
 ## Build locally
 
@@ -198,8 +201,9 @@ Linux container. A workshop LAN setup is a Windows VM or workstation with Rhino 
    at `http://<host>:5000/` (or the IIS binding). `GET /health` on the appserver reports
    `compute.reachable`.
 3. In the app, *Settings*: *Backend URL* `http://<appserver>:8080`, *API key*, *Mesh quality*, then
-   *Test connection*. The banner's *Mesh on server* posts the file to `/mesh`, stores the result as
-   `<sha256>.meshed.3dm` and reloads.
+   *Test connection* (amber when the appserver answers but Compute is missing or unreachable). The
+   banner's *Mesh on server* posts the file to `/mesh` — upload progress and a *Cancel* button in a
+   banner, the model stays usable meanwhile — stores the result as `<sha256>.meshed.3dm` and reloads.
 
 The app allows cleartext `http://` because workshop servers rarely have TLS; anything reachable from the
 internet belongs behind an https reverse proxy with `APP_API_KEY` set.
@@ -215,8 +219,9 @@ Bodies are the raw `.3dm` bytes (`Content-Type: application/octet-stream`); opti
 | `POST /mesh` | the same `.3dm` with every unmeshed Brep / Extrusion / SubD replaced by a Mesh object carrying the original attributes; headers `X-Meshed-Count`, `X-Skipped-Count`, `X-Compute-Ms` |
 | `POST /convert` | binary glTF (`model/gltf-binary`) of all renderable geometry, one node per object, layer/object colours, Z-up → Y-up; headers `X-Object-Count`, `X-Triangle-Count`, `X-Skipped-Count` |
 
-Error codes: `400 invalid_file`, `401 unauthorized`, `413 too_large`, `502 compute_unreachable` /
-`compute_error`, `504 compute_timeout`, `500 internal`.
+Error codes: `400 invalid_file` / `bad_request`, `401 unauthorized`, `404 not_found`, `413 too_large`
+(refused from `Content-Length` before the body is read), `502 compute_unreachable` / `compute_error`,
+`504 compute_timeout`, `500 internal`.
 
 ```sh
 curl -H "X-Api-Key: $KEY" -H 'Content-Type: application/octet-stream' --data-binary @part.3dm \
@@ -237,9 +242,9 @@ Full details (headers, node layout, error table, operational notes): [backend/RE
 | *Test connection* fails | URL must include the scheme and port (`http://192.168.1.20:8080`); the phone must be on the same network as the server; firewall on port 8080; `APP_API_KEY` set on the server but not in the app. |
 | `/health` shows `compute.reachable: false` | Compute not running, wrong `COMPUTE_URL` (port 5000, trailing slash), firewall on the Windows host, or the appserver container cannot reach the host (`host.docker.internal`, see `backend/docker-compose.yml`). |
 | *Mesh on server* returns `502 compute_unreachable` | Compute is not configured (`COMPUTE_URL` empty) or down. `compute_error` carries Compute's own message, usually a licence or key problem. |
-| `413 too_large` | Raise `MAX_UPLOAD_MB` on the server (memory roughly 3× the file size). |
+| `413 too_large`, or *Mesh on server* failing with "the server closed the connection while the file was being uploaded" | The file is above the server's `MAX_UPLOAD_MB`: the appserver refuses it from the `Content-Length` and closes the connection, which the phone often sees as a dropped upload rather than the 413 itself. Raise `MAX_UPLOAD_MB` on the server (memory roughly 3× the file size). |
 | Big file is slow to open or the viewer reloads | Parsing is on-device and needs several times the file size in memory; a 100 MB+ file on a mid-range phone is at the limit. Purge unused layers/blocks in Rhino or convert to a mesh file. |
-| Colours differ from Rhino's rendered view | By design: materials are ignored, objects are drawn in object/layer colour. |
+| Colours differ from Rhino's rendered view | By design: materials are ignored, objects are drawn in object/layer colour, and very dark colours are lightened on screen (exports keep the file colour). |
 | CI run annotated "Unsigned build" | The four signing secrets are missing; see [Signing](#signing-keystore-for-ci). |
 | Tag build fails at "Version and commit metadata" | Tag `vX.Y.Z` must equal `version:` in `app/pubspec.yaml`. Bump, commit, re-tag. |
 | `viewer` job fails (on a tag this also holds back the release) | Download `viewer-screenshots-<sha>` from the run for the rendered fixtures; the log lists the failed check. |

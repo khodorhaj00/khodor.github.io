@@ -74,6 +74,8 @@ class PickedCard extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       _Row(label: 'Type', value: object.objectType),
+                      if (object.blockName.isNotEmpty)
+                        _Row(label: 'Block', value: object.blockName),
                       _Row(label: 'Layer', value: object.layerName),
                       _Row(
                         label: 'Size',

@@ -308,6 +308,31 @@ void main() {
         ),
       );
     });
+
+    test('a connection the server drops mid-upload is upload_rejected', () {
+      // What dart:io reports when the appserver answers 413 + Connection:
+      // close before the body is fully sent (the response itself is lost).
+      final client = MockClient(
+        (_) async => throw http.ClientException('Write failed'),
+      );
+      expect(
+        () =>
+            BackendClient(client: client)
+                .mesh('http://h', bytes: body, name: 'big.3dm'),
+        throwsA(
+          isA<BackendException>()
+              .having((e) => e.code, 'code', 'upload_rejected')
+              .having((e) => e.detail, 'detail', contains('MAX_UPLOAD_MB')),
+        ),
+      );
+      // Other network failures keep their code.
+      expect(
+        () => BackendClient(client: client).health('http://h'),
+        throwsA(
+          isA<BackendException>().having((e) => e.code, 'code', 'network'),
+        ),
+      );
+    });
   });
 
   group('cancellation and upload progress', () {

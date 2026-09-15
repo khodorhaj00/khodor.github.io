@@ -217,6 +217,7 @@ class PickedObject {
     required this.id,
     required this.name,
     required this.objectType,
+    this.blockName = '',
     required this.layerIndex,
     required this.layerName,
     required this.userStrings,
@@ -228,6 +229,7 @@ class PickedObject {
     id: readString(json['id']),
     name: readString(json['name']),
     objectType: readString(json['objectType']),
+    blockName: readString(json['blockName']),
     layerIndex: readInt(json['layerIndex'], fallback: -1),
     layerName: readString(json['layerName']),
     userStrings: _readUserStrings(json['userStrings']),
@@ -257,11 +259,19 @@ class PickedObject {
   final String id;
   final String name;
   final String objectType;
+
+  /// Name of the block definition when the tap landed inside a block
+  /// instance: the viewer then describes the top-level instance
+  /// (`objectType` `InstanceReference`). Empty for plain objects.
+  final String blockName;
   final int layerIndex;
   final String layerName;
   final Map<String, String> userStrings;
   final List<double> size;
   final List<double> center;
 
-  String get displayName => name.isEmpty ? objectType : name;
+  String get displayName {
+    if (name.isNotEmpty) return name;
+    return blockName.isNotEmpty ? blockName : objectType;
+  }
 }

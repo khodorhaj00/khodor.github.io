@@ -53,7 +53,7 @@ Errors are JSON: `{ "error": "<code>", "detail": "<text>" }`.
 | 400 | `bad_request` | `quality` is not `draft`, `default` or `fine`; the body was cut short or aborted (415 for a `Content-Encoding` other than identity/gzip/deflate/br) |
 | 401 | `unauthorized` | `APP_API_KEY` set and `X-Api-Key` missing/wrong |
 | 404 | `not_found` | unknown route |
-| 413 | `too_large` | body above `MAX_UPLOAD_MB` (answered from the `Content-Length` header before the body is read; the connection is then closed) |
+| 413 | `too_large` | body above `MAX_UPLOAD_MB` (answered from the `Content-Length` header before the body is read; the connection is then closed, so a client still sending the body may see a dropped connection instead of this response) |
 | 502 | `compute_unreachable` | Compute not configured or not reachable over the network |
 | 502 | `compute_error` | Compute answered with a non-2xx status (`detail` carries its message) |
 | 504 | `compute_timeout` | Compute did not answer within `COMPUTE_TIMEOUT_MS` |

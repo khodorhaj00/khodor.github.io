@@ -59,10 +59,15 @@ Page files: `index.html`, `viewer.css`, `viewer.js`, `PATCHES.md`.
   `top` looks down −Z, `front` looks along +Y (camera at −Y), `right` looks along −X (camera at +X),
   `iso` = Rhino Perspective default (camera at (−1,−1,+0.8)·d from the target, roughly).
 * Display modes: `shaded` (MeshStandardMaterial, flat lighting: hemisphere + 2 directional, no env
-  map), `shaded_edges` (shaded + `EdgesGeometry` at 30°), `wireframe`, `ghosted` (opacity 0.35,
-  depthWrite false). Materials from the file are **replaced** by layer/object color materials —
-  production files have unreliable materials; color = object color if `colorSource` is
-  `ObjectColorSource_ColorFromObject`, else layer color. `side = DoubleSide` (open surfaces).
+  map), `shaded_edges` (shaded + `EdgesGeometry` at 30°, built in 30 ms slices between frames,
+  visible meshes first; a mesh above 100 000 triangles keeps its shading only), `wireframe`,
+  `ghosted` (opacity 0.35, depthWrite false). Materials from the file are **replaced** by
+  layer/object color materials — production files have unreliable materials; the loader's
+  `_createMaterial` is overridden to return one placeholder, so embedded textures are never
+  decoded; color = object color if `colorSource` is `ObjectColorSource_ColorFromObject`, else
+  layer color. Near-black colours (relative luminance < 0.12 — Rhino's default layer is black)
+  are lifted towards `#9AA1AA` **for display only**; `stats.layers[].color` and the GLB export
+  keep the file's colour. `side = DoubleSide` (open surfaces).
 * Colors on `userData.attributes` from the loader: `attributes.objectColor` is `{r,g,b,a}`
   (0–255), `attributes.colorSource.name`, `attributes.layerIndex`, `attributes.name`,
   `attributes.id`, `attributes.userStrings` (array of `[key, value]` pairs) — verify the exact
@@ -70,14 +75,26 @@ Page files: `index.html`, `viewer.css`, `viewer.js`, `PATCHES.md`.
 * Layers come from `object.userData.layers` (array in file order: `{name, color:{r,g,b,a},
   visible, fullPath, parentLayerId, id, index?}`) — verify field names in the loader; a layer's
   `objectCount` is computed by walking the scene. Layer visibility toggles every object with that
-  `layerIndex`, including objects inside block instances (walk `object.traverse`).
+  `layerIndex`, including objects inside block instances (walk `object.traverse`). Objects hidden
+  in Rhino (`attributes.visible === false`, the Hide command) are never drawn, counted in
+  `triangles` or exported, but keep their place in `meshes` and `objectCount`.
+* Block instances: the stock loader expands one level only, so `viewer.js` overrides
+  `_createGeometry` to build definitions recursively (a definition that contains itself stays
+  empty). Each `InstanceReference` becomes an `Object3D` wrapper carrying the reference's own
+  `userData.attributes` (layer, name, id, user strings), `userData.objectType =
+  'InstanceReference'` and `userData.blockName`; its children are clones of the definition
+  members. Stats count top-level wrappers as `blocks`; nested members are not counted as `meshes`.
 * Background: dark gradient (#1B1F26 top → #0E1013 bottom) drawn with a fullscreen quad or CSS
   behind a transparent renderer (`alpha: true`). Grid: `GridHelper` sized to the model bbox
   (10× the largest dimension, 20 divisions), on the Z=0 plane (rotate −90° about X), subtle
   (#2A3038 / #1F252C), toggleable.
 * Picking: pointerdown/pointerup with movement < 6 px and < 300 ms → `Raycaster` against
-  visible meshes → emit `objectPicked`. Highlight the picked mesh (emissive #FFB020 × 0.35)
-  until the next pick; tap on empty space clears and emits `null`.
+  visible meshes → emit `objectPicked`. Highlight the picked mesh (emissive #FFB020 × 0.35 plus
+  an outline drawn through everything: its hard edges, or its bounding box when it has none or is
+  above the edge limit; outline colour #FFB020, or #3DA5FF when the object's own colour is within
+  RGB distance 100 of it) until the next pick; tap on empty space clears and emits `null`. A hit
+  inside a block instance reports the **top-level instance** (its name, layer, id and user
+  strings, the member's user strings filling gaps), as Rhino selects blocks.
 * Performance: `renderer.setPixelRatio(min(devicePixelRatio, 2))`; render on demand (only on
   controls `change`, load, resize, mode change) — no continuous RAF loop. Dispose geometry and
   materials on `clear()`.
@@ -91,7 +108,7 @@ All methods are synchronous or return a Promise; all results are reported throug
 |---|---|
 | `viewer.load({ url?, base64?, name })` | Clears the scene, loads a `.3dm` from `url` (fetch, preferred) or from `base64` (fallback). Emits `loadProgress` then exactly one `loadResult`. |
 | `viewer.clear()` | Removes and disposes the model. |
-| `viewer.fit()` | Frames the bounding box of visible objects (perspective and ortho). |
+| `viewer.fit()` | Frames the visible objects' silhouette (every drawn vertex, not a bounding sphere) so it spans 80 % of the limiting viewport axis, in both cameras; also run on every `resize` (phone rotation) so the model is re-framed rather than cropped. |
 | `viewer.setView(name)` | `iso` `top` `bottom` `front` `back` `left` `right`; then `fit()`. |
 | `viewer.setProjection(p)` | `perspective` (default) or `ortho`. Keeps target and framing. |
 | `viewer.setDisplayMode(m)` | `shaded` (default) `shaded_edges` `wireframe` `ghosted`. |
@@ -110,11 +127,11 @@ When it does not (desktop browser, Playwright tests) it pushes `{name, payload}`
 
 | Handler | Payload |
 |---|---|
-| `viewerReady` | `{ three: 'r186', rhino3dm: '8.32.2' }` — emitted once after `rhino3dm` is initialised (do a tiny warm-up so the first real load is fast). |
+| `viewerReady` | `{ three: 'r186', rhino3dm: '8.32.2' }` — emitted once the worker has instantiated `rhino3dm` (the patched loader's `worker._ready`, see `PATCHES.md`), so the first real load only pays for parsing. Never emitted when initialisation fails: that is a `log` error, and every later `load()` answers `loadResult { ok: false }` instead of hanging. |
 | `loadProgress` | `{ phase: 'fetch'|'parse'|'build', progress: 0..1 }` |
-| `loadResult` | `{ ok: true, name, stats }` or `{ ok: false, name, error }` |
+| `loadResult` | `{ ok: true, name, stats }` or `{ ok: false, name, error }`. A fetch failure carries `error` = `HTTP <status> while fetching <url>` (or Chromium's `Failed to fetch`); the app's base64 fallback (§3.1) keys on those texts, so keep them. Bytes `rhino3dm` cannot read give `Not a valid or complete .3dm file`. |
 | `exportResult` | `{ ok: true, filename, base64 }` or `{ ok: false, error }` |
-| `objectPicked` | `{ id, name, objectType, layerIndex, layerName, userStrings: {k: v}, size: [dx,dy,dz], center: [x,y,z] }` or `null` |
+| `objectPicked` | `{ id, name, objectType, blockName, layerIndex, layerName, userStrings: {k: v}, size: [dx,dy,dz], center: [x,y,z] }` or `null`. `blockName` is `''` unless the hit lies inside a block instance; then the payload describes the top-level instance (`objectType: 'InstanceReference'`, `blockName` = definition name, size/center of the whole instance). |
 | `log` | `{ level: 'info'|'warn'|'error', message }` |
 
 `Stats`:
@@ -193,14 +210,22 @@ by swallowing every touch-move event before Chromium sees it, which kills orbit,
 the page blocks scrolling itself (`viewer.css`: `overflow: hidden`, `touch-action: none`).
 
 Model URL passed to JS: `https://appassets.androidplatform.net/files/<fileName>` where
-`<fileName>` is a file inside `modelsDir`. Fallback if the URL fetch fails: `base64`.
+`<fileName>` is a file inside `modelsDir`. Fallback if the URL fetch fails (`loadResult.error`
+matching the fetch texts of §2.2 — never for parse/build failures, which would only fail again):
+`base64`, tried once per file and only for files up to 25 MB, since the inline path holds several
+copies of the bytes in memory. The `viewerReady` handshake has a 20 s watchdog armed when the
+page's `onLoadStop` fires; *Retry* after any error recreates the platform WebView (new widget
+key) instead of reloading it, because a crashed render process cannot be reloaded.
 
 ### 3.2 Storage & cache
 
 * `modelsDir = <getApplicationSupportDirectory()>/models/`
 * Picked/received file → copied to `modelsDir/<sha256>.3dm` (sha256 of content; skip copy if exists).
-* Server-meshed result → `modelsDir/<sha256>.meshed.3dm`. Opening a file prefers the `.meshed`
-  variant when present. This is the "cache so re-opening skips the round-trip".
+* Server-meshed result → `modelsDir/<sha256>.meshed.3dm`, written to a temp file next to it and
+  renamed into place (a kill mid-write cannot leave a truncated copy). Opening a file prefers the
+  `.meshed` variant when present. This is the "cache so re-opening skips the round-trip". If the
+  `.meshed` copy fails to load it is deleted, the recents `meshed` flag cleared and the original
+  loaded instead. LRU eviction deletes both variants.
 * Recents in `SharedPreferences` key `recents_v1` (JSON list of
   `{sha, name, size, addedAt, lastOpenedAt, meshed}`), most recent first, max 40 entries. LRU
   eviction also deletes the files. Total size cap 1 GB (settings).
@@ -209,10 +234,15 @@ Model URL passed to JS: `https://appassets.androidplatform.net/files/<fileName>`
 ### 3.3 Android intents (open `.3dm` from file manager / WhatsApp / email / Drive)
 
 `MainActivity.kt` (Kotlin) handles `ACTION_VIEW` and `ACTION_SEND` in `onCreate`/`onNewIntent`:
-copy the `content://`/`file://` stream to `cacheDir/incoming/<displayName or received.3dm>`,
-then deliver the path to Dart over `MethodChannel('com.styro3d.rhino_viewer/intent')`:
+copy the `content://`/`file://` stream to `cacheDir/incoming/<random uuid>/<displayName or
+received.3dm>` (one directory per intent, written as `.partial` and renamed, so a second share of
+a same-named file cannot clobber a copy Dart is still importing and a failed copy leaves nothing
+behind), then deliver the path to Dart over `MethodChannel('com.styro3d.rhino_viewer/intent')`:
 Dart calls `getInitialFile()` → `String?` once at startup; later intents arrive as
-`onFile(String path)` invocations from Kotlin. Dart then imports it like a picked file.
+`onFile(String path)` invocations from Kotlin. Dart then imports it like a picked file and
+deletes that per-intent directory (`IntentService.discardIncoming`). An `ACTION_SEND` without
+`EXTRA_STREAM` (text or link shares — the `*/*` filter lists the app in every share sheet) gets a
+toast and is ignored.
 Manifest intent filters (all with `android:exported="true"` on MainActivity):
 * `VIEW` + `DEFAULT` + `BROWSABLE`, `scheme=file`, `host=*`, `mimeType=*/*`,
   `pathPattern=.*\\.3dm` (plus the `.*\\..*\\.3dm`, `.*\\..*\\..*\\.3dm` variants)
@@ -233,10 +263,16 @@ Kotlin rejects anything whose bytes do not start with the `.3dm` magic (toast + 
   Grid toggle · Ortho toggle. Loading overlay with phase + progress bar. Banner when
   `unmeshed.total > 0`: "N objects have no render mesh" + `Mesh on server` (if backend URL
   configured; runs `/mesh`, saves `.meshed.3dm`, reloads) or `Set up server` (→ settings) and a
-  hint "or re-save in Rhino with Save small unchecked". Picked-object card (name, layer, size
-  in model units, user strings) anchored bottom-left above the toolbar.
+  hint "or re-save in Rhino with Save small unchecked". While `/mesh` runs the banner is replaced
+  by a meshing banner (upload progress, then "waiting for Rhino.Compute", `Cancel` aborts the
+  request) and the model stays usable underneath. When the `.meshed` copy is what is on screen
+  and still reports unmeshed objects, the banner says the server could not mesh them and offers
+  no retry. Picked-object card (name, block name for instances, type, layer, size in model units
+  with a unit symbol, user strings; scrolls when long) anchored bottom-left above the toolbar.
 * **Settings**: backend URL, API key (obscured), mesh quality (`draft/default/fine`), cache size
-  cap, "Clear cache", "Test connection" (`GET /health`), about (versions of three/rhino3dm).
+  cap, "Clear cache", "Test connection" (`GET /health`; green when Compute is reachable, amber
+  when the appserver answers but Compute is not configured or unreachable — `/mesh` fails in
+  that state — red with the error code otherwise), about (versions of three/rhino3dm).
 
 Visual language (user preference): dark, industrial, no decoration. Tokens: bg `#0E1013`,
 surface `#161A1F`, border `#262B33`, text `#E6E8EB`, muted `#8B93A1`, accent `#FFB020`,
@@ -258,10 +294,13 @@ lib/core/services/backend_client.dart   health/mesh/convert over an injectable h
 lib/core/services/settings_service.dart
 lib/core/services/intent_service.dart   MethodChannel wrapper
 lib/features/home/home_page.dart
-lib/features/viewer/viewer_page.dart (+ widgets/: toolbar, layers_sheet, stats_sheet, picked_card, unmeshed_banner, loading_overlay)
+lib/features/viewer/viewer_page.dart (+ widgets/: toolbar, layers_sheet, stats_sheet, picked_card, unmeshed_banner, meshing_banner, loading_overlay)
 lib/features/settings/settings_page.dart
-test/                             unit tests for models, cache_service (temp dir), backend_client
-                                  (http MockClient), viewer_bridge (fake JsRunner); widget test for HomePage.
+lib/app/format.dart                counts, bytes, lengths, unit symbols, relative dates (no intl)
+test/                             unit tests for models, viewer events, format, file_service and
+                                  cache_service (temp dir), backend_client (http MockClient),
+                                  intent_service, viewer_bridge (fake JsRunner); widget tests for
+                                  HomePage, SettingsPage and the viewer widgets.
 ```
 
 ### 3.6 Signing (`android/app/build.gradle.kts`)
@@ -307,9 +346,15 @@ glTF asset name). Responses on error are JSON `{ "error": "<code>", "detail": "<
 | `POST /mesh` | `200 application/octet-stream` — the same `.3dm` where every Brep / Extrusion / SubD **without** a cached render mesh is replaced by a Mesh object carrying the original `ObjectAttributes` (layer, name, color source, user strings, id preserved where the API allows). Headers `X-Meshed-Count`, `X-Skipped-Count`, `X-Compute-Ms`. If nothing needs meshing → original bytes, `X-Meshed-Count: 0`. |
 | `POST /convert` | `200 model/gltf-binary` (`.glb`) — all renderable geometry: Mesh objects, cached render meshes of Breps/Extrusions, SubD (control net subdivided ×2 locally via rhino3dm), instance references expanded (nested transforms), Compute-meshed unmeshed Breps when Compute is configured (else skipped, counted in `X-Skipped-Count`). One glTF node per object, `name` = object name or id, `extras` `{ id, layer, layerIndex, userStrings }`, one material per distinct color (object color or layer color), root node matrix rotating Z-up → Y-up. Headers `X-Object-Count`, `X-Triangle-Count`, `X-Skipped-Count`, `Content-Disposition: attachment; filename="<name>.glb"`. |
 
-Errors: `400 invalid_file` (magic bytes / rhino3dm parse failure), `401 unauthorized`,
-`413 too_large`, `502 compute_unreachable` / `compute_error` (with Compute's message),
-`504 compute_timeout`, `500 internal`.
+Errors: `400 invalid_file` (magic bytes / rhino3dm parse failure), `400 bad_request` (bad
+`quality`, or a body cut short / aborted — body-parser's own 4xx keep their status, e.g. 415 for
+an unsupported `Content-Encoding`), `401 unauthorized`, `404 not_found`, `413 too_large`
+(answered from the `Content-Length` header before the body is read, with `Connection: close` so
+the client stops uploading; chunked bodies are still capped by body-parser — a client still
+sending the body usually sees the dropped connection rather than this response, which
+`BackendClient` reports as `upload_rejected` with a message naming `MAX_UPLOAD_MB`),
+`502 compute_unreachable` / `compute_error` (with Compute's message), `504 compute_timeout`,
+`500 internal`.
 
 ### 4.3 Implementation notes
 * `rhino3dm` npm 8.32.2 (`await rhino3dm()` once at startup, exported as a promise).
@@ -327,11 +372,20 @@ Errors: `400 invalid_file` (magic bytes / rhino3dm parse failure), `401 unauthor
 * GLB writer (`src/glb.js`, hand-written, no three.js): binary glTF 2.0, one buffer, accessors
   for `POSITION` (float32, min/max), `NORMAL` (float32), indices (uint32), 4-byte alignment,
   `asset.generator = "styro3d-rhino-appserver"`. Unit test validates structure.
-* Logging: one JSON line per request to stdout `{ts, method, path, status, ms, bytesIn, bytesOut, meshed, skipped}`.
+* Logging: one JSON line per request to stdout `{ts, method, path, status, ms, bytesIn, bytesOut, meshed, skipped, aborted}`
+  (`aborted: true` when the client dropped the connection before the response was delivered —
+  the line is written on the response's `close`, not `finish`, so aborted uploads are logged too).
+* Every rhino3dm handle a request creates — the parsed `File3dm` first of all — is freed in a
+  `finally` (`release()` in `rhino.js`, which takes embind's destructor from the shared
+  `ClassHandle` prototype because the table classes shadow `delete` with `delete(id)`); otherwise
+  each request leaks the whole model in WASM memory.
 * `Dockerfile`: `node:22-alpine`, non-root `node` user, `npm ci --omit=dev`, `HEALTHCHECK` via
-  `node -e "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"`,
-  `EXPOSE 8080`. `docker-compose.yml` with the env vars and a comment block explaining the
-  Windows Compute host. `.env.example`. `README.md` inside `/backend` for API + deploy.
+  `node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"`,
+  `EXPOSE 8080`. `docker-compose.yml` with the env vars (`${VAR-default}`, so an empty
+  `COMPUTE_URL=` in `.env` disables Compute; the compose default is
+  `http://host.docker.internal:5000/`, since `localhost` inside the container is the appserver
+  itself) and a comment block explaining the Windows Compute host. `.env.example`. `README.md`
+  inside `/backend` for API + deploy.
 * Tests (`node --test test/`): GLB structure; `/mesh` on `test/fixtures/brep_nomesh.3dm` with
   fake Compute → 0 Breps, 3 meshes, names/layers preserved, `X-Meshed-Count: 2`; `/convert` on
   `meshes.3dm` and `blocks.3dm` (no Compute) → valid GLB, node count, `X-Skipped-Count: 0`;
