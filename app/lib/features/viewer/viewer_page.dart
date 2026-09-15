@@ -817,6 +817,13 @@ class _ViewerPageState extends State<ViewerPage> {
     return Scaffold(
       backgroundColor: AppColors.bg,
       body: Stack(
+        // A Stack takes its size from its NON-positioned children and only
+        // falls back to the incoming constraints when it has none
+        // (rendering/stack.dart, RenderStack._computeSize). Every child here
+        // is positioned, so a single unpositioned child of zero size would
+        // collapse the whole screen to nothing. Size from the constraints
+        // instead, so no child can ever do that.
+        fit: StackFit.expand,
         children: [
           Positioned.fill(
             child: InAppWebView(
@@ -1016,7 +1023,11 @@ class _ViewerPageState extends State<ViewerPage> {
               progress: overlay.progress,
               opaque: overlay.opaque,
             ),
-            ViewerOverlayKind.none => const SizedBox.shrink(),
+            // Positioned, like the other two branches: an unpositioned
+            // zero-size child would otherwise shrink the Stack.
+            ViewerOverlayKind.none => const Positioned.fill(
+              child: IgnorePointer(child: SizedBox.shrink()),
+            ),
           },
         ],
       ),
