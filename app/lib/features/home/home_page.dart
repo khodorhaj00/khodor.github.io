@@ -6,6 +6,8 @@ import '../../app/theme.dart';
 import '../../core/models/recent_file.dart';
 import '../../core/services/file_service.dart';
 import '../settings/settings_page.dart';
+import '../viewer/widgets/diagnostics_sheet.dart';
+import 'app_report.dart';
 
 typedef OpenEntryCallback = Future<void> Function(
   BuildContext context,
@@ -149,6 +151,21 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title: const Text('Rhino Viewer'),
         actions: [
+          // Reachable even when the viewer screen cannot draw, which is when
+          // the report matters most.
+          IconButton(
+            tooltip: 'Diagnostics',
+            icon: const Icon(Icons.bug_report_outlined),
+            onPressed: () => DiagnosticsSheet.show(
+              context,
+              report: buildAppReport(
+                at: DateTime.now(),
+                uncaught: widget.services.errors.records,
+                hybridComposition:
+                    widget.services.settings.value.hybridWebViewComposition,
+              ),
+            ),
+          ),
           IconButton(
             tooltip: 'Settings',
             icon: const Icon(Icons.settings_outlined),

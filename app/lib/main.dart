@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app/app_services.dart';
+import 'app/build_failure_screen.dart';
 import 'app/theme.dart';
 import 'core/models/recent_file.dart';
 import 'core/services/backend_client.dart';
@@ -25,6 +26,10 @@ Future<void> main() async {
   // it exists to catch happens before any screen could install it
   // (ARCHITECTURE.md 3.1a).
   final errors = PlatformErrorMonitor()..install();
+  // A widget that throws is replaced by a featureless box in a release build,
+  // which is indistinguishable from a screen that simply drew nothing. Show
+  // the error instead.
+  BuildFailureScreen.install();
   WidgetsFlutterBinding.ensureInitialized();
   final support = await getApplicationSupportDirectory();
   final temp = await getTemporaryDirectory();
