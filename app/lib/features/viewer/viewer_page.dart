@@ -12,6 +12,7 @@ import 'package:share_plus/share_plus.dart';
 import '../../app/app_services.dart';
 import '../../app/format.dart';
 import '../../app/theme.dart';
+import '../../core/bridge/internal_storage_path_handler_fix.dart';
 import '../../core/bridge/viewer_bridge.dart';
 import '../../core/models/model_stats.dart';
 import '../../core/models/recent_file.dart';
@@ -826,7 +827,10 @@ class _ViewerPageState extends State<ViewerPage> {
                 webViewAssetLoader: WebViewAssetLoader(
                   pathHandlers: [
                     AssetsPathHandler(path: '/assets/'),
-                    InternalStoragePathHandler(
+                    // Not InternalStoragePathHandler: the plugin's own
+                    // toMap() recurses and overflows the stack before the
+                    // platform view is ever created. See the subclass.
+                    SafeInternalStoragePathHandler(
                       path: '/files/',
                       directory: _services.modelsDir.path,
                     ),
