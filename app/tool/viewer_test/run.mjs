@@ -40,6 +40,8 @@ const FIXTURES = [
   { name: 'hidden_objects.3dm', url: '/app/tool/viewer_test/fixtures/hidden_objects.3dm' },
   { name: 'black_layer.3dm', url: '/app/tool/viewer_test/fixtures/black_layer.3dm' },
   { name: 'textured.3dm', url: '/app/tool/viewer_test/fixtures/textured.3dm' },
+  // Written by Rhino 8 (make_annotations.py): rhino3dm cannot create annotations.
+  { name: 'annotations.3dm', url: '/app/tool/viewer_test/fixtures/annotations.3dm', optional: true },
 ];
 
 const MIME = {
@@ -472,6 +474,16 @@ function checkTextured(stats) {
   checkEqual(stats.triangles, 40 * BOX_TRIANGLES, 'textured.3dm: rendered triangles');
 }
 
+function checkAnnotations(stats) {
+  checkEqual(stats.annotations, 5, 'annotations.3dm: annotations (linear, aligned, diameter, text, leader)');
+  checkEqual(stats.hatches, 2, 'annotations.3dm: hatches');
+  checkEqual(stats.categories.annotations, 5, 'annotations.3dm: categories.annotations');
+  checkEqual(stats.categories.hatches, 2, 'annotations.3dm: categories.hatches');
+  checkEqual(stats.meshes, 1, 'annotations.3dm: meshes');
+  const warned = stats.warnings.filter((w) => /not implemented|could not be read/.test(w.message));
+  checkEqual(warned.length, 0, 'annotations.3dm: no annotation/hatch conversion warnings');
+}
+
 const FIXTURE_CHECKS = {
   'meshes.3dm': checkMeshes,
   'brep_nomesh.3dm': checkBrepNoMesh,
@@ -481,6 +493,7 @@ const FIXTURE_CHECKS = {
   'hidden_objects.3dm': checkHiddenObjects,
   'black_layer.3dm': checkBlackLayer,
   'textured.3dm': checkTextured,
+  'annotations.3dm': checkAnnotations,
 };
 
 // Checks that need the page after the fixture is loaded and drawn (grid off).
@@ -536,10 +549,52 @@ async function pageCheckTextured(page) {
   checkEqual(await page.evaluate(() => window.__imageLoads), 0, 'textured.3dm: <img> decodes of the embedded texture (materials are replaced, none expected)');
 }
 
+// Hiding annotations or hatches removes them from the frame; showing them brings the frame
+// back exactly.
+async function pageCheckAnnotations(page) {
+  await page.evaluate(() => {
+    window.viewer.setGrid(false);
+    window.viewer.setView('top');
+  });
+  const all = await modelSignature(page);
+  await page.screenshot({ path: path.join(outDir, 'annotations_top.png') });
+  for (const category of ['annotations', 'hatches']) {
+    await page.evaluate((c) => window.viewer.setCategoryVisible(c, false), category);
+    const hidden = await modelSignature(page);
+    check(hidden.drawn < all.drawn, `annotations.3dm: hiding ${category} removes pixels (${all.drawn} → ${hidden.drawn})`);
+    await page.evaluate((c) => window.viewer.setCategoryVisible(c, true), category);
+    const back = await modelSignature(page);
+    checkEqual(back.hash, all.hash, `annotations.3dm: showing ${category} restores the frame`);
+  }
+  await page.evaluate(() => {
+    window.viewer.setGrid(true);
+    window.viewer.setView('iso');
+  });
+}
+
+async function pageCheckTexturedRendered(page) {
+  await page.evaluate(() => window.viewer.setDisplayMode('rendered'));
+  await settle(page);
+  checkEqual(await page.evaluate(() => window.__imageLoads), 0, 'textured.3dm: rendered (basic) decodes no textures');
+  await page.evaluate(() => window.viewer.setRenderQuality('full'));
+  await page.waitForFunction(() => window.__imageLoads > 0, null, { timeout: 10000 }).catch(() => {});
+  check(await page.evaluate(() => window.__imageLoads) > 0, 'textured.3dm: rendered (full) decodes the embedded texture');
+  await checkNotBlank(page, 'textured.3dm: rendered full');
+  await page.screenshot({ path: path.join(outDir, 'textured_rendered_full.png') });
+  await page.evaluate(() => {
+    window.viewer.setRenderQuality('basic');
+    window.viewer.setDisplayMode('shaded');
+  });
+}
+
 const FIXTURE_PAGE_CHECKS = {
   'hidden_objects.3dm': pageCheckHiddenObjects,
   'black_layer.3dm': pageCheckBlackLayer,
-  'textured.3dm': pageCheckTextured,
+  'textured.3dm': async (page) => {
+    await pageCheckTextured(page);
+    await pageCheckTexturedRendered(page);
+  },
+  'annotations.3dm': pageCheckAnnotations,
 };
 
 // ---------------------------------------------------------------------------------------
@@ -598,6 +653,127 @@ async function testDisplayModes(page) {
     await page.screenshot({ path: path.join(outDir, `meshes_${mode}.png`) });
   }
   checkEqual(seen.size, 4, 'display modes: four distinct frames');
+}
+
+// The rendered mode draws, differs from shaded, survives the full quality and hands the
+// exact shaded frame back when left.
+async function testRenderedMode(page) {
+  await page.evaluate(() => window.viewer.setGrid(false));
+  const shaded = await modelSignature(page);
+  await page.evaluate(() => window.viewer.setDisplayMode('rendered'));
+  const rendered = await modelSignature(page);
+  check(rendered.drawn / rendered.total > BLANK_THRESHOLD && rendered.hash !== shaded.hash, `rendered: ${rendered.drawn} pixels drawn, differs from shaded`);
+  await page.screenshot({ path: path.join(outDir, 'meshes_rendered.png') });
+  await page.evaluate(() => window.viewer.setRenderQuality('full'));
+  const full = await modelSignature(page);
+  check(full.drawn / full.total > BLANK_THRESHOLD && full.hash !== rendered.hash, `rendered full: ${full.drawn} pixels drawn, shadows change the frame`);
+  await page.screenshot({ path: path.join(outDir, 'meshes_rendered_full.png') });
+  await page.evaluate(() => {
+    window.viewer.setRenderQuality('basic');
+    window.viewer.setDisplayMode('shaded');
+  });
+  const back = await modelSignature(page);
+  checkEqual(back.hash, shaded.hash, 'rendered → shaded: shaded frame restored');
+  await page.evaluate(() => window.viewer.setGrid(true));
+}
+
+// Hiding a category removes it, and a category excluded from selection cannot be tapped.
+async function testCategories(page) {
+  await page.evaluate(() => {
+    window.viewer.setView('top');
+    window.viewer.setGrid(false);
+  });
+  const all = await modelSignature(page);
+  await page.evaluate(() => window.viewer.setCategoryVisible('meshes', false));
+  const noMeshes = await modelSignature(page);
+  check(noMeshes.drawn < all.drawn, `setCategoryVisible(meshes, false): fewer pixels (${all.drawn} → ${noMeshes.drawn})`);
+  await page.evaluate(() => window.viewer.setCategoryVisible('meshes', true));
+  checkEqual((await modelSignature(page)).hash, all.hash, 'setCategoryVisible(meshes, true): frame restored');
+
+  await captureFrame(page, 'plain');
+  const corner = await findPixel(page, 'white');
+  check(corner !== null, `selection filter: white pixel found at ${JSON.stringify(corner)}`);
+  if (corner) {
+    const tap = { x: corner.x + 12, y: corner.y + 12 };
+    await page.evaluate(() => window.viewer.setCategoryPickable('meshes', false));
+    const filtered = await pickAt(page, tap.x, tap.y, 'selection filter: meshes off');
+    check(filtered === null, `selection filter: meshes off → nothing picked (${filtered ? filtered.name : 'null'})`);
+    await page.evaluate(() => window.viewer.setCategoryPickable('meshes', true));
+    const hit = await pickAt(page, tap.x, tap.y, 'selection filter: meshes on');
+    check(hit && /^block_\d_\d$/.test(hit.name), `selection filter: meshes on → ${hit ? hit.name : 'nothing'}`);
+    await pickAt(page, 4, 4, 'selection filter: clear pick');
+  }
+  await page.evaluate(() => {
+    window.viewer.setGrid(true);
+    window.viewer.setView('iso');
+  });
+}
+
+async function measureAt(page, x, y) {
+  const from = await eventCount(page);
+  await page.mouse.click(x, y);
+  const events = await eventsSince(page, from);
+  checkEqual(events.filter((e) => e.name === 'objectPicked').length, 0, `caliper tap ${x},${y}: no selection`);
+  const measures = events.filter((e) => e.name === 'measure');
+  return measures.length ? measures[measures.length - 1].payload : undefined;
+}
+
+// Caliper: two taps give a distance and deltas, a third starts over, clearMeasure empties.
+async function testMeasure(page) {
+  const viewport = page.viewportSize();
+  await page.evaluate(() => {
+    window.viewer.setView('top');
+    window.viewer.setGrid(false);
+  });
+  await settle(page);
+  const corner = await findPixel(page, 'white');
+  const from = await eventCount(page);
+  await page.evaluate(() => window.viewer.setMeasureMode(true));
+  const started = (await eventsSince(page, from)).filter((e) => e.name === 'measure');
+  check(started.length >= 1 && started[started.length - 1].payload.points.length === 0, 'caliper: measure mode starts empty');
+
+  const centre = { x: viewport.width / 2, y: viewport.height / 2 };
+  const first = await measureAt(page, centre.x, centre.y);
+  check(first && first.points.length === 1 && first.distance === null, `caliper: first point ${JSON.stringify(first && first.points)}`);
+  if (corner) {
+    const second = await measureAt(page, corner.x + 1, corner.y + 1);
+    check(second && second.points.length === 2 && second.distance > 0, `caliper: distance ${second && second.distance}`);
+    if (second) {
+      const [a, b] = second.points;
+      const d = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+      check(Math.abs(d - second.distance) < 1e-6, 'caliper: distance matches the points');
+      check(second.delta.every((v, i) => Math.abs(v - (b[i] - a[i])) < 1e-6), `caliper: delta ${JSON.stringify(second.delta)}`);
+      checkEqual(second.snaps[1], 'vertex', 'caliper: a tap on a box corner snaps to its vertex');
+    }
+    await page.screenshot({ path: path.join(outDir, 'meshes_caliper.png') });
+    const third = await measureAt(page, centre.x, centre.y);
+    check(third && third.points.length === 1, 'caliper: a third tap starts a new measurement');
+  }
+  await page.evaluate(() => window.viewer.clearMeasure());
+  await page.evaluate(() => window.viewer.setMeasureMode(false));
+  const back = await pickAt(page, centre.x, centre.y, 'caliper off: tap selects again');
+  check(back && back.name === 'sphere_ref', `caliper off: picked ${back ? back.name : 'nothing'}`);
+  await pickAt(page, 4, 4, 'caliper off: clear pick');
+  await page.evaluate(() => {
+    window.viewer.setGrid(true);
+    window.viewer.setView('iso');
+  });
+}
+
+// Curve accuracy applies to the next load: the logo's 218 curves get more points at max
+// than at standard, and loading still works at every level.
+async function testCurveQuality(page) {
+  const counts = {};
+  for (const quality of ['standard', 'high', 'max']) {
+    await page.evaluate((q) => window.viewer.setCurveQuality(q), quality);
+    const result = await loadModel(page, { url: '/samples/Rhino_Logo.3dm', name: `Rhino_Logo (${quality}).3dm` });
+    if (!result.ok) return;
+    checkEqual(result.stats.curves, 218, `curve quality ${quality}: curves`);
+    checkEqual(result.stats.curveQuality, quality, `curve quality ${quality}: reported`);
+    counts[quality] = result.stats.curvePoints;
+  }
+  check(counts.standard < counts.high && counts.high < counts.max, `curve quality: points standard ${counts.standard} < high ${counts.high} < max ${counts.max}`);
+  await page.evaluate(() => window.viewer.setCurveQuality('high'));
 }
 
 async function testViewsAndProjection(page) {
@@ -1156,6 +1332,10 @@ async function main() {
 
     let meshesStats = null;
     for (const fixture of FIXTURES) {
+      if (fixture.optional && !fs.existsSync(path.join(repoRoot, fixture.url))) {
+        console.log(`\n== ${fixture.name}: not present, skipped (see fixtures/make_annotations.py)`);
+        continue;
+      }
       console.log(`\n== ${fixture.name}`);
       const result = await loadModel(page, { url: fixture.url, name: fixture.name });
       if (!result.ok) continue;
@@ -1177,11 +1357,16 @@ async function main() {
       await testLayerToggle(page, meshesStats);
       await testCurvesAndPoints(page);
       await testDisplayModes(page);
+      await testRenderedMode(page);
       await testViewsAndProjection(page);
       await testResize(page);
       await testPicking(page);
+      await testCategories(page);
+      await testMeasure(page);
       console.log('\n== picking (blocks.3dm, nested_blocks.3dm)');
       await testPickingBlocks(page);
+      console.log('\n== curve accuracy (Rhino_Logo.3dm)');
+      await testCurveQuality(page);
       console.log('\n== base64 / errors / clear');
       await testBase64Load(page);
       await testBadLoad(page);

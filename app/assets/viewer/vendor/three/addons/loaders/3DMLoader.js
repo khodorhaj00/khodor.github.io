@@ -84,6 +84,9 @@ class Rhino3dmLoader extends Loader {
 		// values increase smoothness at the cost of (potentially very large) vertex counts.
 		this.subdivisionLevel = 3;
 
+		// PATCH(curve-accuracy): 'standard' | 'high' | 'max', sent with every decode.
+		this.curveQuality = 'high';
+
 		this.materials = [];
 		this.warnings = [];
 
@@ -212,7 +215,8 @@ class Rhino3dmLoader extends Loader {
 
 					worker._callbacks[ taskID ] = { resolve, reject };
 
-					worker.postMessage( { type: 'decode', id: taskID, buffer, subdivisionLevel: this.subdivisionLevel }, [ buffer ] );
+					// PATCH(curve-accuracy): the worker samples curves to this quality ('standard' | 'high' | 'max').
+					worker.postMessage( { type: 'decode', id: taskID, buffer, subdivisionLevel: this.subdivisionLevel, curveQuality: this.curveQuality }, [ buffer ] );
 
 				} );
 
@@ -1134,6 +1138,18 @@ function Rhino3dmWorker() {
 	let taskID;
 	let initError; // PATCH(init-error)
 
+	// PATCH(curve-accuracy): chord tolerance as a fraction of each curve's own size, arc step,
+	// and the per-curve point cap. See curveToPoints().
+	const CURVE_QUALITY = {
+		standard: { relTol: 1e-3, arcStepDeg: 5, maxPoints: 2000 },
+		high: { relTol: 2e-4, arcStepDeg: 2, maxPoints: 8000 },
+		max: { relTol: 5e-5, arcStepDeg: 1, maxPoints: 32000 }
+	};
+	let curveTolerances = CURVE_QUALITY.high;
+
+	// PATCH(annotations): dimension styles by id, looked up once per decode.
+	let dimstyleCache = null;
+
 	onmessage = function ( e ) {
 
 		const message = e.data;
@@ -1174,6 +1190,7 @@ function Rhino3dmWorker() {
 				taskID = message.id;
 				const buffer = message.buffer;
 				const subdivisionLevel = message.subdivisionLevel;
+				curveTolerances = CURVE_QUALITY[ message.curveQuality ] || CURVE_QUALITY.high; // PATCH(curve-accuracy)
 				libraryPending.then( () => {
 
 					try {
@@ -1274,19 +1291,31 @@ function Rhino3dmWorker() {
 		const objs = doc.objects();
 		const cnt = objs.count;
 
-		for ( let i = 0; i < cnt; i ++ ) {
+		dimstyleCache = new Map(); // PATCH(annotations)
 
-			const _object = objs.get( i );
+		try {
 
-			const object = extractObjectData( _object, doc, subdivisionLevel );
+			for ( let i = 0; i < cnt; i ++ ) {
 
-			_object.delete();
+				const _object = objs.get( i );
 
-			if ( object ) {
+				const object = extractObjectData( _object, doc, subdivisionLevel );
 
-				objects.push( object );
+				_object.delete();
+
+				if ( object ) {
+
+					objects.push( object );
+
+				}
 
 			}
+
+		} finally {
+
+			// PATCH(annotations): the looked-up styles are copies owned by this decode.
+			for ( const style of dimstyleCache.values() ) if ( style ) style.delete();
+			dimstyleCache = null;
 
 		}
 
@@ -1594,7 +1623,7 @@ function Rhino3dmWorker() {
 
 			case rhino.ObjectType.Curve:
 
-				const pts = curveToPoints( _geometry, 100 );
+				const pts = curveToPoints( _geometry ); // PATCH(curve-accuracy): was a fixed 100 samples
 
 				position = {};
 				attributes = {};
@@ -1760,9 +1789,35 @@ function Rhino3dmWorker() {
 
 				break;
 
+			// PATCH(annotations): dimensions, text and leaders become lines, arrowheads and a
+			// text placement; hatches become their boundary loops. Built on the main thread.
+			case rhino.ObjectType.Annotation:
+
+				geometry = extractAnnotation( _geometry, doc );
+
+				break;
+
+			case rhino.ObjectType.Hatch:
+
+				geometry = extractHatch( _geometry );
+
+				if ( ! geometry ) {
+
+					self.postMessage( { type: 'warning', id: taskID, data: {
+						message: 'THREE.3DMLoader: Hatch boundary could not be read.',
+						type: 'no conversion',
+						guid: _attributes.id
+					}
+
+					} );
+
+					return;
+
+				}
+
+				break;
+
 				/*
-				case rhino.ObjectType.Annotation:
-				case rhino.ObjectType.Hatch:
 				case rhino.ObjectType.ClipPlane:
 				*/
 
@@ -1888,118 +1943,573 @@ function Rhino3dmWorker() {
 
 	}
 
-	function curveToPoints( curve, pointLimit ) {
+	// PATCH(curve-accuracy): curves are sampled adaptively against a chord tolerance relative
+	// to each curve's own size (per knot span, arcs by angle) instead of a fixed 100 uniform
+	// samples, so long or detailed curves keep their real shape. Returns [ [x, y, z], ... ].
+	function curveToPoints( curve ) {
 
-		let pointCount = pointLimit;
-		let rc = [];
-		const ts = [];
+		const out = [];
+		appendCurvePoints( curve, out, curveTolerance( curve ) );
+		return out;
+
+	}
+
+	function curveTolerance( curve ) {
+
+		let diag = 0;
+
+		try {
+
+			const box = curve.getBoundingBox();
+			diag = Math.hypot( box.max[ 0 ] - box.min[ 0 ], box.max[ 1 ] - box.min[ 1 ], box.max[ 2 ] - box.min[ 2 ] );
+			if ( typeof box.delete === 'function' ) box.delete();
+
+		} catch ( e ) {
+
+			diag = 0;
+
+		}
+
+		const tol = diag * curveTolerances.relTol;
+		return tol > 0 && isFinite( tol ) ? tol : 1e-9;
+
+	}
+
+	function pushPoint( out, p ) {
+
+		const last = out[ out.length - 1 ];
+		if ( last && last[ 0 ] === p[ 0 ] && last[ 1 ] === p[ 1 ] && last[ 2 ] === p[ 2 ] ) return;
+		out.push( [ p[ 0 ], p[ 1 ], p[ 2 ] ] );
+
+	}
+
+	function appendCurvePoints( curve, out, tol ) {
 
 		if ( curve instanceof rhino.LineCurve ) {
 
-			return [ curve.pointAtStart, curve.pointAtEnd ];
+			pushPoint( out, curve.pointAtStart );
+			pushPoint( out, curve.pointAtEnd );
+			return;
 
 		}
 
 		if ( curve instanceof rhino.PolylineCurve ) {
 
-			pointCount = curve.pointCount;
-			for ( let i = 0; i < pointCount; i ++ ) {
-
-				rc.push( curve.point( i ) );
-
-			}
-
-			return rc;
+			for ( let i = 0; i < curve.pointCount; i ++ ) pushPoint( out, curve.point( i ) );
+			return;
 
 		}
 
 		if ( curve instanceof rhino.PolyCurve ) {
 
-			const segmentCount = curve.segmentCount;
-
-			for ( let i = 0; i < segmentCount; i ++ ) {
+			for ( let i = 0; i < curve.segmentCount; i ++ ) {
 
 				const segment = curve.segmentCurve( i );
-				const segmentArray = curveToPoints( segment, pointCount );
-				rc = rc.concat( segmentArray );
+				appendCurvePoints( segment, out, tol );
 				segment.delete();
 
 			}
 
-			return rc;
+			return;
 
 		}
 
 		if ( curve instanceof rhino.ArcCurve ) {
 
-			pointCount = Math.floor( curve.angleDegrees / 5 );
-			pointCount = pointCount < 2 ? 2 : pointCount;
-			// alternative to this hardcoded version: https://stackoverflow.com/a/18499923/2179399
+			const count = Math.max( 2, Math.ceil( Math.abs( curve.angleDegrees ) / curveTolerances.arcStepDeg ) + 1 );
+			const domain = curve.domain;
+			for ( let j = 0; j < count; j ++ ) {
 
-		}
-
-		if ( curve instanceof rhino.NurbsCurve && curve.degree === 1 ) {
-
-			const pLine = curve.tryGetPolyline();
-
-			for ( let i = 0; i < pLine.count; i ++ ) {
-
-				rc.push( pLine.get( i ) );
+				pushPoint( out, curve.pointAt( domain[ 0 ] + ( j / ( count - 1 ) ) * ( domain[ 1 ] - domain[ 0 ] ) ) );
 
 			}
 
-			pLine.delete();
-
-			return rc;
+			return;
 
 		}
 
-		const domain = curve.domain;
-		const divisions = pointCount - 1.0;
+		const owned = ! ( curve instanceof rhino.NurbsCurve );
+		const nurbs = owned ? curve.toNurbsCurve() : curve;
+		if ( ! nurbs ) return;
 
-		for ( let j = 0; j < pointCount; j ++ ) {
+		try {
 
-			const t = domain[ 0 ] + ( j / divisions ) * ( domain[ 1 ] - domain[ 0 ] );
+			const params = spanParameters( nurbs );
+			const limit = out.length + curveTolerances.maxPoints;
+			// Straight spans need no subdivision; curved ones are always split a little so a
+			// span whose midpoint happens to sit on the chord is still sampled.
+			const minDepth = nurbs.degree <= 1 ? 0 : ( params.length > 64 ? 1 : 2 );
+			let previous = nurbs.pointAt( params[ 0 ] );
+			pushPoint( out, previous );
 
-			if ( t === domain[ 0 ] || t === domain[ 1 ] ) {
+			for ( let s = 0; s + 1 < params.length; s ++ ) {
 
-				ts.push( t );
-				continue;
-
-			}
-
-			const tan = curve.tangentAt( t );
-			const prevTan = curve.tangentAt( ts.slice( - 1 )[ 0 ] );
-
-			// Duplicated from THREE.Vector3
-			// How to pass imports to worker?
-
-			const tS = tan[ 0 ] * tan[ 0 ] + tan[ 1 ] * tan[ 1 ] + tan[ 2 ] * tan[ 2 ];
-			const ptS = prevTan[ 0 ] * prevTan[ 0 ] + prevTan[ 1 ] * prevTan[ 1 ] + prevTan[ 2 ] * prevTan[ 2 ];
-
-			const denominator = Math.sqrt( tS * ptS );
-
-			let angle;
-
-			if ( denominator === 0 ) {
-
-				angle = Math.PI / 2;
-
-			} else {
-
-				const theta = ( tan.x * prevTan.x + tan.y * prevTan.y + tan.z * prevTan.z ) / denominator;
-				angle = Math.acos( Math.max( - 1, Math.min( 1, theta ) ) );
+				const next = nurbs.pointAt( params[ s + 1 ] );
+				subdivideSpan( nurbs, params[ s ], previous, params[ s + 1 ], next, tol * tol, 0, minDepth, out, limit );
+				pushPoint( out, next );
+				previous = next;
 
 			}
 
-			if ( angle < 0.1 ) continue;
+		} finally {
 
-			ts.push( t );
+			if ( owned ) nurbs.delete();
 
 		}
 
-		rc = ts.map( t => curve.pointAt( t ) );
-		return rc;
+	}
+
+	// The increasing, distinct knot values inside the curve's domain, plus both ends.
+	function spanParameters( nurbs ) {
+
+		const domain = nurbs.domain;
+		const eps = Math.abs( domain[ 1 ] - domain[ 0 ] ) * 1e-12;
+		const params = [ domain[ 0 ] ];
+		const knots = typeof nurbs.knots === 'function' ? nurbs.knots() : nurbs.knots;
+
+		if ( knots ) {
+
+			for ( let i = 0; i < knots.count; i ++ ) {
+
+				const k = knots.get( i );
+				if ( k > params[ params.length - 1 ] + eps && k < domain[ 1 ] - eps ) params.push( k );
+
+			}
+
+			if ( typeof knots.delete === 'function' ) knots.delete();
+
+		}
+
+		params.push( domain[ 1 ] );
+		return params;
+
+	}
+
+	function subdivideSpan( curve, t0, p0, t1, p1, tol2, depth, minDepth, out, limit ) {
+
+		if ( depth >= 10 || out.length >= limit ) return;
+
+		const tm = ( t0 + t1 ) / 2;
+		const pm = curve.pointAt( tm );
+
+		if ( depth >= minDepth ) {
+
+			const dx = pm[ 0 ] - ( p0[ 0 ] + p1[ 0 ] ) / 2;
+			const dy = pm[ 1 ] - ( p0[ 1 ] + p1[ 1 ] ) / 2;
+			const dz = pm[ 2 ] - ( p0[ 2 ] + p1[ 2 ] ) / 2;
+			if ( dx * dx + dy * dy + dz * dz <= tol2 ) return;
+
+		}
+
+		subdivideSpan( curve, t0, p0, tm, pm, tol2, depth + 1, minDepth, out, limit );
+		pushPoint( out, pm );
+		subdivideSpan( curve, tm, pm, t1, p1, tol2, depth + 1, minDepth, out, limit );
+
+	}
+
+	// PATCH(annotations) ----------------------------------------------------------------
+	// Annotations become { kind, text, plane, textHeight, textGap, font, normal, lines,
+	// arrows, label }: world-space line segments (flat xyz pairs), arrowheads ({ tip, dir,
+	// type, size }) and one text placement ({ point, dir, align, valign }). Built from the
+	// definition points rhino3dm exposes; rhino3dm has no font metrics, so text extents and
+	// the text gap in dimension lines are laid out on the main thread.
+
+	function toXYZ( p ) {
+
+		if ( ! p ) return null;
+		if ( p.X !== undefined ) return [ p.X, p.Y, p.Z ];
+		if ( p.length === 3 || p.length === 2 ) return [ p[ 0 ], p[ 1 ], p[ 2 ] || 0 ];
+		return null;
+
+	}
+
+	function vAdd( a, b ) {
+
+		return [ a[ 0 ] + b[ 0 ], a[ 1 ] + b[ 1 ], a[ 2 ] + b[ 2 ] ];
+
+	}
+
+	function vSub( a, b ) {
+
+		return [ a[ 0 ] - b[ 0 ], a[ 1 ] - b[ 1 ], a[ 2 ] - b[ 2 ] ];
+
+	}
+
+	function vScale( a, s ) {
+
+		return [ a[ 0 ] * s, a[ 1 ] * s, a[ 2 ] * s ];
+
+	}
+
+	function vDot( a, b ) {
+
+		return a[ 0 ] * b[ 0 ] + a[ 1 ] * b[ 1 ] + a[ 2 ] * b[ 2 ];
+
+	}
+
+	function vLength( a ) {
+
+		return Math.hypot( a[ 0 ], a[ 1 ], a[ 2 ] );
+
+	}
+
+	function vNormalize( a ) {
+
+		const length = a ? vLength( a ) : 0;
+		return length > 0 ? vScale( a, 1 / length ) : null;
+
+	}
+
+	function vCross( a, b ) {
+
+		return [ a[ 1 ] * b[ 2 ] - a[ 2 ] * b[ 1 ], a[ 2 ] * b[ 0 ] - a[ 0 ] * b[ 2 ], a[ 0 ] * b[ 1 ] - a[ 1 ] * b[ 0 ] ];
+
+	}
+
+	function enumName( value, prefix ) {
+
+		const name = value && value.constructor ? value.constructor.name : '';
+		return name.startsWith( prefix ) ? name.substring( prefix.length ) : name;
+
+	}
+
+	function tryGet( fn ) {
+
+		try {
+
+			return fn();
+
+		} catch ( e ) {
+
+			return undefined;
+
+		}
+
+	}
+
+	function dimstyleFor( doc, id ) {
+
+		if ( ! dimstyleCache ) return null;
+		if ( dimstyleCache.has( id ) ) return dimstyleCache.get( id );
+
+		const table = doc.dimstyles();
+		let style = tryGet( () => table.findId( id ) ) || null;
+		// An annotation with per-object overrides may name a style that is not in the table.
+		if ( ! style && table.count > 0 ) style = tryGet( () => table.get( 0 ) ) || null;
+		// The table is not freed here: its `delete( id )` shadows the handle destructor.
+
+		dimstyleCache.set( id, style );
+		return style;
+
+	}
+
+	function extractAnnotation( g, doc ) {
+
+		const kind = enumName( g.annotationType, 'AnnotationTypes_' ) || 'Unset';
+		const style = dimstyleFor( doc, g.dimensionStyleId );
+		const plane = g.plane;
+		const origin = toXYZ( plane.origin ) || [ 0, 0, 0 ];
+		const xAxis = vNormalize( toXYZ( plane.xAxis ) ) || [ 1, 0, 0 ];
+		const yAxis = vNormalize( toXYZ( plane.yAxis ) ) || [ 0, 1, 0 ];
+		const textHeight = style && style.textHeight > 0 ? style.textHeight : 1;
+		const font = style ? tryGet( () => {
+
+			const f = style.getFont();
+			const family = f && f.familyName;
+			if ( f && typeof f.delete === 'function' ) f.delete();
+			return family;
+
+		} ) : undefined;
+
+		const out = {
+			kind,
+			text: tryGet( () => g.plainTextWithFields ) || tryGet( () => g.plainText ) || '',
+			plane: { origin, xAxis, yAxis },
+			normal: vNormalize( vCross( xAxis, yAxis ) ) || [ 0, 0, 1 ],
+			textHeight,
+			textGap: style && style.textGap >= 0 ? style.textGap : textHeight / 4,
+			font: font || 'Arial',
+			lines: [],
+			arrows: [],
+			label: null
+		};
+
+		const line = ( a, b ) => {
+
+			if ( a && b ) out.lines.push( a[ 0 ], a[ 1 ], a[ 2 ], b[ 0 ], b[ 1 ], b[ 2 ] );
+
+		};
+
+		const arrow = ( tip, from, type, size ) => {
+
+			const dir = tip && from ? vNormalize( vSub( tip, from ) ) : null;
+			if ( dir && type !== 'None' ) out.arrows.push( { tip, dir, type: type || 'SolidTriangle', size: size > 0 ? size : textHeight } );
+
+		};
+
+		const pts = tryGet( () => g.points );
+
+		switch ( kind ) {
+
+			case 'Aligned':
+			case 'Rotated': {
+
+				const d1 = toXYZ( pts && pts.defpt1 );
+				const d2 = toXYZ( pts && pts.defpt2 );
+				const a1 = toXYZ( pts && pts.arrowpt1 );
+				const a2 = toXYZ( pts && pts.arrowpt2 );
+				const dimline = toXYZ( pts && pts.dimline );
+				const textPoint = toXYZ( pts && pts.textpt );
+				if ( ! a1 || ! a2 ) break;
+
+				const offset = style ? style.extensionLineOffset : 0;
+				const extension = style ? style.extensionLineExtension : 0;
+				const extensionLine = ( from, to, suppressed ) => {
+
+					const v = from ? vSub( to, from ) : null;
+					const length = v ? vLength( v ) : 0;
+					if ( suppressed || length < 1e-9 ) return;
+					const u = vScale( v, 1 / length );
+					line( vAdd( from, vScale( u, Math.min( offset, length ) ) ), vAdd( to, vScale( u, extension ) ) );
+
+				};
+
+				extensionLine( d1, a1, style && style.suppressExtension1 );
+				extensionLine( d2, a2, style && style.suppressExtension2 );
+
+				const axis = vNormalize( vSub( a2, a1 ) );
+				if ( axis ) {
+
+					// The dimension line runs between the arrows and on to the text when the text
+					// sits outside them.
+					let t0 = 0;
+					let t1 = vLength( vSub( a2, a1 ) );
+					for ( const p of [ dimline, textPoint ] ) {
+
+						if ( ! p ) continue;
+						const t = vDot( vSub( p, a1 ), axis );
+						t0 = Math.min( t0, t );
+						t1 = Math.max( t1, t );
+
+					}
+
+					out.dimensionLine = [ ...vAdd( a1, vScale( axis, t0 ) ), ...vAdd( a1, vScale( axis, t1 ) ) ];
+					const arrowSize = style ? style.arrowLength : textHeight;
+					if ( ! ( style && style.suppressArrow1 ) ) arrow( a1, a2, enumName( style && style.arrowType1, 'ArrowheadTypes_' ), arrowSize );
+					if ( ! ( style && style.suppressArrow2 ) ) arrow( a2, a1, enumName( style && style.arrowType2, 'ArrowheadTypes_' ), arrowSize );
+
+				}
+
+				out.label = { point: textPoint || vScale( vAdd( a1, a2 ), 0.5 ), dir: axis || xAxis, align: 'center', valign: 'above' };
+				break;
+
+			}
+
+			case 'Radius':
+			case 'Diameter': {
+
+				const center = toXYZ( pts && pts.centerpt );
+				const radius = toXYZ( pts && pts.radiuspt );
+				const dimline = toXYZ( pts && pts.dimlinept );
+				const knee = toXYZ( pts && pts.kneept ) || dimline;
+				if ( ! radius || ! dimline ) break;
+
+				line( radius, knee );
+				if ( vLength( vSub( dimline, knee ) ) > 1e-9 ) line( knee, dimline );
+				arrow( radius, knee, enumName( style && style.arrowType1, 'ArrowheadTypes_' ), style ? style.arrowLength : textHeight );
+
+				const mark = style ? style.centermarkSize : 0;
+				if ( center && mark > 0 ) {
+
+					line( vAdd( center, vScale( xAxis, - mark ) ), vAdd( center, vScale( xAxis, mark ) ) );
+					line( vAdd( center, vScale( yAxis, - mark ) ), vAdd( center, vScale( yAxis, mark ) ) );
+
+				}
+
+				const toText = vNormalize( vSub( dimline, knee ) ) || vNormalize( vSub( dimline, radius ) ) || xAxis;
+				out.label = { point: dimline, dir: xAxis, align: vDot( toText, xAxis ) >= 0 ? 'left' : 'right', valign: 'middle', gap: true };
+				break;
+
+			}
+
+			case 'Leader': {
+
+				const points = [];
+				if ( pts && typeof pts.length === 'number' ) {
+
+					for ( let i = 0; i < pts.length; i ++ ) {
+
+						const p = toXYZ( pts[ i ] );
+						if ( p ) points.push( p );
+
+					}
+
+				}
+
+				if ( points.length === 0 ) break;
+				for ( let i = 0; i + 1 < points.length; i ++ ) line( points[ i ], points[ i + 1 ] );
+				if ( points.length >= 2 ) {
+
+					arrow( points[ 0 ], points[ 1 ], enumName( style && style.leaderArrowType, 'ArrowheadTypes_' ), style ? style.leaderArrowLength : textHeight );
+
+				}
+
+				const last = points[ points.length - 1 ];
+				const lastX = vDot( vSub( last, origin ), xAxis );
+				const textPoint2d = style ? tryGet( () => g.getTextPoint2d( style, 1 ) ) : undefined;
+				let point = last;
+				let align = points.length >= 2 && vDot( vSub( last, points[ points.length - 2 ] ), xAxis ) < 0 ? 'right' : 'left';
+				let gap = true;
+
+				if ( textPoint2d && textPoint2d.length >= 2 && isFinite( textPoint2d[ 0 ] ) ) {
+
+					// Rhino's own text point already includes the landing and the text gap.
+					point = vAdd( origin, vAdd( vScale( xAxis, textPoint2d[ 0 ] ), vScale( yAxis, textPoint2d[ 1 ] ) ) );
+					align = textPoint2d[ 0 ] >= lastX ? 'left' : 'right';
+					gap = false;
+					if ( style && style.leaderHasLanding && style.leaderLandingLength > 0 ) {
+
+						const sign = align === 'left' ? 1 : - 1;
+						line( last, vAdd( last, vScale( xAxis, sign * style.leaderLandingLength ) ) );
+
+					}
+
+				}
+
+				out.label = { point, dir: xAxis, align, valign: 'middle', gap };
+				break;
+
+			}
+
+			case 'Text':
+
+				out.label = { point: origin, dir: xAxis, align: 'left', valign: 'top' };
+				break;
+
+			default: {
+
+				// Angular, ordinate and centre marks: Rhino's own display lines, when rhino3dm
+				// can compute them for this type.
+				if ( style && typeof g.getDisplayLines === 'function' ) {
+
+					const result = tryGet( () => g.getDisplayLines( style, 1 ) );
+					if ( result && result.lines ) {
+
+						for ( let i = 0; i < result.lines.size(); i ++ ) {
+
+							const l = result.lines.get( i );
+							line( toXYZ( l.from ), toXYZ( l.to ) );
+							if ( typeof l.delete === 'function' ) l.delete();
+
+						}
+
+						result.lines.delete();
+						if ( result.text_rect ) result.text_rect.delete();
+
+					}
+
+				}
+
+				let point = toXYZ( pts && ( pts.textpt || pts.textPoint || pts.dimlinept ) );
+				if ( ! point ) {
+
+					const box = tryGet( () => g.getTightBoundingBox() );
+					if ( box && box.min[ 0 ] <= box.max[ 0 ] ) point = vScale( vAdd( box.min, box.max ), 0.5 );
+					if ( box && typeof box.delete === 'function' ) box.delete();
+
+				}
+
+				out.label = { point: point || origin, dir: xAxis, align: 'center', valign: 'middle' };
+				break;
+
+			}
+
+		}
+
+		if ( ! out.text ) out.label = null;
+		return out;
+
+	}
+
+	// Hatches: rhino3dm exposes neither the loops nor the pattern, but the hatch's own
+	// opennurbs record does. Each loop is written as a version byte (0x11), an int loop type
+	// (0 outer, 1 inner) and the 2D boundary curve as an embedded class record, which
+	// CommonObject.decode() can read on its own.
+	const TCODE_OPENNURBS_CLASS = 0x00027FFA;
+
+	function base64ToBytes( base64 ) {
+
+		const binary = atob( base64 );
+		const bytes = new Uint8Array( binary.length );
+		for ( let i = 0; i < binary.length; i ++ ) bytes[ i ] = binary.charCodeAt( i );
+		return bytes;
+
+	}
+
+	function bytesToBase64( bytes ) {
+
+		let binary = '';
+		for ( let i = 0; i < bytes.length; i += 0x8000 ) {
+
+			binary += String.fromCharCode.apply( null, bytes.subarray( i, i + 0x8000 ) );
+
+		}
+
+		return btoa( binary );
+
+	}
+
+	function extractHatch( g ) {
+
+		const encoded = tryGet( () => g.encode() );
+		if ( ! encoded || ! encoded.data ) return null;
+
+		const bytes = base64ToBytes( encoded.data );
+		const view = new DataView( bytes.buffer, bytes.byteOffset, bytes.byteLength );
+		const plane = g.plane;
+		const loops = [];
+
+		// Start past the hatch's own class record header.
+		for ( let off = 12; off + 12 <= bytes.length; off ++ ) {
+
+			if ( view.getUint32( off, true ) !== TCODE_OPENNURBS_CLASS ) continue;
+			const length = Number( view.getBigUint64( off + 4, true ) );
+			if ( off + 12 + length > bytes.length ) continue;
+			if ( off < 5 || bytes[ off - 5 ] !== 0x11 ) continue;
+
+			const type = view.getInt32( off - 4, true );
+			const curve = tryGet( () => rhino.CommonObject.decode( {
+				version: encoded.version,
+				archive3dm: encoded.archive3dm,
+				opennurbs: encoded.opennurbs,
+				data: bytesToBase64( bytes.subarray( off, off + 12 + length ) )
+			} ) );
+
+			if ( curve && curve instanceof rhino.Curve ) {
+
+				const points = [];
+				for ( const p of curveToPoints( curve ) ) points.push( p[ 0 ], p[ 1 ] );
+				if ( points.length >= 6 ) loops.push( { outer: type !== 1, points } );
+
+			}
+
+			if ( curve && typeof curve.delete === 'function' ) curve.delete();
+			// Never look inside a record already handled (a polycurve's own segments).
+			off += 11 + length;
+
+		}
+
+		if ( loops.length === 0 ) return null;
+
+		return {
+			plane: {
+				origin: toXYZ( plane.origin ) || [ 0, 0, 0 ],
+				xAxis: vNormalize( toXYZ( plane.xAxis ) ) || [ 1, 0, 0 ],
+				yAxis: vNormalize( toXYZ( plane.yAxis ) ) || [ 0, 1, 0 ]
+			},
+			patternIndex: tryGet( () => g.patternIndex ) || 0,
+			loops
+		};
 
 	}
 

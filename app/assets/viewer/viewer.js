@@ -2,6 +2,16 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { Rhino3dmLoader } from 'three/addons/loaders/3DMLoader.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import {
+  ANNOTATION_TYPES,
+  buildAnnotation,
+  buildHatch,
+  collectScaledParts,
+  disposeAnnotationResources,
+  isScaledPart,
+  updateAnnotationScale,
+} from './annotations.js';
 
 // ---------------------------------------------------------------------------------------
 // Start-up guard (installed by index.html before this module loads)
@@ -45,8 +55,32 @@ const VIEW_DIRECTIONS = {
   right: [1, 0, 0],
   left: [-1, 0, 0],
 };
-const DISPLAY_MODES = ['shaded', 'shaded_edges', 'wireframe', 'ghosted'];
+const DISPLAY_MODES = ['shaded', 'shaded_edges', 'wireframe', 'ghosted', 'rendered'];
+const RENDER_QUALITIES = ['basic', 'full'];
+const CURVE_QUALITIES = ['standard', 'high', 'max'];
 const MESH_TYPES = new Set(['Mesh', 'Brep', 'Extrusion', 'SubD']);
+// Object categories for the "Show" and selection-filter switches. Everything inside a
+// block instance also follows the `blocks` switch.
+const CATEGORY_OF = {
+  Brep: 'surfaces',
+  Extrusion: 'surfaces',
+  SubD: 'surfaces',
+  Mesh: 'meshes',
+  Curve: 'curves',
+  Point: 'points',
+  PointSet: 'points',
+  Annotation: 'annotations',
+  TextDot: 'annotations',
+  Hatch: 'hatches',
+  InstanceReference: 'blocks',
+};
+const CATEGORIES = ['surfaces', 'meshes', 'curves', 'points', 'annotations', 'hatches', 'blocks'];
+const PICK_LINE_PX = 12;
+const SNAP_PX = 16;
+const MEASURE_COLOR = 0xFFB020;
+const MEASURE_LEG_COLOR = 0x8B93A1;
+const LABEL_PX = 22;
+const SHADOW_MAP_SIZE = 2048;
 
 // ---------------------------------------------------------------------------------------
 // Loader: stock loader minus file materials, plus full (nested) block-instance expansion
@@ -60,6 +94,14 @@ const placeholderMaterial = new THREE.MeshStandardMaterial({ name: 'placeholder'
 class ViewerLoader extends Rhino3dmLoader {
   _createMaterial() {
     return placeholderMaterial;
+  }
+
+  // Annotations and hatches arrive from the patched worker (PATCHES.md) and are built by
+  // annotations.js; everything else is the stock conversion.
+  _createObject(obj, mat) {
+    if (obj.objectType === 'Annotation') return buildAnnotation(obj);
+    if (obj.objectType === 'Hatch') return buildHatch(obj);
+    return super._createObject(obj, mat);
   }
 
   // The stock loader expands block instances one level only: a reference that is itself a
@@ -76,6 +118,8 @@ class ViewerLoader extends Rhino3dmLoader {
       else if (obj.objectType !== 'InstanceReference') plain.push(obj);
     }
     const root = super._createGeometry({ ...data, objects: plain });
+    // The file's own materials, for the rendered display mode (built on demand).
+    root.userData.renderMaterials = data.materials || [];
 
     const templates = new Map();
     const building = new Set();
@@ -238,6 +282,8 @@ function requestRender() {
 function renderFrame() {
   renderQueued = false;
   updateClipPlanes();
+  updateAnnotationScale(scaledParts, camera, appliedHeight || viewportHeight());
+  updateMeasureLabel();
   renderer.render(scene, camera);
 }
 
@@ -309,6 +355,7 @@ function observeViewport() {
 const meshMaterials = new Map();
 const lineMaterials = new Map();
 const pointMaterials = new Map();
+const flatMaterials = new Map();
 const edgeMaterial = new THREE.LineBasicMaterial({ color: 0x8B93A1 });
 const edgeGeometries = new Map();
 const darkLiftHsl = new THREE.Color(DARK_LIFT_COLOR).getHSL({}, THREE.SRGBColorSpace);
@@ -392,7 +439,275 @@ function pointMaterialFor(hex, vertexColors) {
   return material;
 }
 
+// Unlit, for arrowheads and hatch fills; `opacity` < 1 is drawn behind coplanar geometry.
+function flatMaterialFor(hex, opacity = 1) {
+  const key = `${hex}:${opacity}`;
+  let material = flatMaterials.get(key);
+  if (!material) {
+    const translucent = opacity < 1;
+    material = new THREE.MeshBasicMaterial({
+      color: hex,
+      side: THREE.DoubleSide,
+      transparent: translucent,
+      opacity,
+      depthWrite: !translucent,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
+    });
+    material.toneMapped = false;
+    flatMaterials.set(key, material);
+  }
+  return material;
+}
+
+// One per label: the texture is the label's own (white text, tinted by the colour).
+function textMaterialFor(texture, hex) {
+  const material = new THREE.MeshBasicMaterial({
+    map: texture,
+    color: hex,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  material.toneMapped = false;
+  material.userData.perObject = true;
+  return material;
+}
+
+// Colours the parts of an annotation or hatch group in the group's colour.
+function colorAnnotationParts(group, hex) {
+  for (const part of group.children) {
+    switch (part.userData.annotationPart) {
+      case 'lines':
+        part.material = lineMaterialFor(hex);
+        break;
+      case 'arrow':
+        part.material = part.isLineSegments ? lineMaterialFor(hex) : flatMaterialFor(hex);
+        break;
+      case 'fill':
+        part.material = flatMaterialFor(hex, part.userData.opacity);
+        break;
+      case 'text':
+        part.material = textMaterialFor(part.material.map, hex);
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------
+// Rendered display mode: the file's own materials, image-based light, optional textures
+// and shadows ('full')
+// ---------------------------------------------------------------------------------------
+
+let renderQuality = 'basic';
+let roomEnvironment = null;
+let sunLight = null;
+let shadowGround = null;
+const renderMaterials = new Map();
+// Each mesh's per-colour display material while it wears a render material. Not in
+// userData: Object3D.clone() JSON-copies userData (the GLB export clones the model).
+const shadedMaterialOf = new WeakMap();
+const textureLoader = new THREE.TextureLoader();
+
+function environmentTexture() {
+  if (!roomEnvironment) {
+    const generator = new THREE.PMREMGenerator(renderer);
+    const room = new RoomEnvironment();
+    roomEnvironment = generator.fromScene(room, 0.04).texture;
+    room.dispose();
+    generator.dispose();
+  }
+  return roomEnvironment;
+}
+
+// The render material index Rhino would use for an object, or -1.
+function renderMaterialIndex(attributes, layers) {
+  const source = attributes.materialSource && attributes.materialSource.name;
+  if (source === 'ObjectMaterialSource_MaterialFromObject') return attributes.materialIndex ?? -1;
+  if (source === 'ObjectMaterialSource_MaterialFromLayer') {
+    const layer = layers[attributes.layerIndex];
+    return layer && layer.renderMaterialIndex >= 0 ? layer.renderMaterialIndex : -1;
+  }
+  return -1;
+}
+
+const unit = (value, fallback) => (Number.isFinite(value) ? THREE.MathUtils.clamp(value, 0, 1) : fallback);
+
+function loadTexture(texture, colour) {
+  const map = textureLoader.load(texture.image, () => requestRender());
+  map.wrapS = texture.wrapU === 0 ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
+  map.wrapT = texture.wrapV === 0 ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
+  if (texture.repeat) map.repeat.set(texture.repeat[0], texture.repeat[1]);
+  if (colour) map.colorSpace = THREE.SRGBColorSpace;
+  return map;
+}
+
+function buildRenderMaterial(data, fallbackHex, withTextures) {
+  const material = new THREE.MeshStandardMaterial({ side: THREE.DoubleSide, roughness: 0.45, metalness: 0 });
+  if (!data) {
+    material.color.setHex(fallbackHex);
+    return material;
+  }
+  if (data.pbrSupported && data.pbr) {
+    const pbr = data.pbr;
+    const base = pbr.baseColor || {};
+    material.color.setRGB(unit(base.r, 1), unit(base.g, 1), unit(base.b, 1), THREE.SRGBColorSpace);
+    material.roughness = unit(pbr.roughness, 0.5);
+    material.metalness = unit(pbr.metallic, 0);
+    material.opacity = unit(pbr.opacity, 1);
+  } else {
+    const diffuse = data.diffuseColor || { r: 255, g: 255, b: 255 };
+    material.color.setRGB(diffuse.r / 255, diffuse.g / 255, diffuse.b / 255, THREE.SRGBColorSpace);
+    // Rhino's legacy shine runs 0..255 (glossier is higher).
+    material.roughness = THREE.MathUtils.clamp(1 - (Number(data.shine) || 0) / 255, 0.08, 1);
+    material.metalness = THREE.MathUtils.clamp(Number(data.reflectivity) || 0, 0, 1) * 0.5;
+    material.opacity = 1 - unit(data.transparency, 0);
+  }
+  const emission = data.emissionColor;
+  if (emission) material.emissive.setRGB(emission.r / 255, emission.g / 255, emission.b / 255, THREE.SRGBColorSpace);
+  material.transparent = material.opacity < 1;
+  material.depthWrite = !material.transparent;
+  material.name = data.name || '';
+
+  if (withTextures) {
+    for (const texture of data.textures || []) {
+      if (!texture.image) continue;
+      switch (texture.type) {
+        case 'Diffuse':
+        case 'PBR_BaseColor':
+          material.map = loadTexture(texture, true);
+          material.color.setRGB(1, 1, 1);
+          break;
+        case 'Bump':
+          material.bumpMap = loadTexture(texture, false);
+          break;
+        case 'PBR_Roughness':
+          material.roughnessMap = loadTexture(texture, false);
+          break;
+        case 'PBR_Metallic':
+          material.metalnessMap = loadTexture(texture, false);
+          break;
+        case 'PBR_AmbientOcclusion':
+          material.aoMap = loadTexture(texture, false);
+          break;
+        case 'PBR_Emission':
+          material.emissiveMap = loadTexture(texture, true);
+          break;
+        case 'Transparency':
+        case 'PBR_Alpha':
+          material.alphaMap = loadTexture(texture, false);
+          material.transparent = true;
+          break;
+        default:
+          break;
+      }
+    }
+  }
+  return material;
+}
+
+function renderMaterialFor(mesh) {
+  const layers = currentLayers();
+  const attributes = mesh.userData.attributes || {};
+  const index = renderMaterialIndex(attributes, layers);
+  const materials = modelRoot ? modelRoot.userData.renderMaterials || [] : [];
+  const data = index >= 0 ? materials[index] : null;
+  const hex = mesh.userData.displayHex ?? 0xffffff;
+  const key = data ? `m${index}:${renderQuality}` : `c${hex}`;
+  let material = renderMaterials.get(key);
+  if (!material) {
+    material = buildRenderMaterial(data, hex, renderQuality === 'full');
+    renderMaterials.set(key, material);
+  }
+  return material;
+}
+
+function disposeRenderMaterials() {
+  for (const material of renderMaterials.values()) {
+    for (const slot of ['map', 'bumpMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap', 'alphaMap']) {
+      if (material[slot]) material[slot].dispose();
+    }
+    material.dispose();
+  }
+  renderMaterials.clear();
+}
+
+function updateShadowRig() {
+  const wantShadows = displayMode === 'rendered' && renderQuality === 'full' && !modelBounds.isEmpty();
+  if (renderer.shadowMap.enabled !== wantShadows) {
+    renderer.shadowMap.enabled = wantShadows;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
+    for (const material of renderMaterials.values()) material.needsUpdate = true;
+  }
+  if (!wantShadows) {
+    if (sunLight) sunLight.visible = false;
+    if (shadowGround) shadowGround.visible = false;
+    return;
+  }
+  const size = modelBounds.getSize(new THREE.Vector3());
+  const center = modelBounds.getCenter(new THREE.Vector3());
+  const radius = Math.max(size.length() / 2, 1e-3);
+  if (!sunLight) {
+    sunLight = new THREE.DirectionalLight(0xffffff, 1.6);
+    sunLight.castShadow = true;
+    sunLight.shadow.mapSize.set(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+    scene.add(sunLight, sunLight.target);
+  }
+  sunLight.visible = true;
+  sunLight.target.position.copy(center);
+  sunLight.position.copy(center).addScaledVector(new THREE.Vector3(-0.6, -0.9, 1.4).normalize(), radius * 3);
+  const shadowCamera = sunLight.shadow.camera;
+  shadowCamera.left = -radius * 1.5;
+  shadowCamera.right = radius * 1.5;
+  shadowCamera.top = radius * 1.5;
+  shadowCamera.bottom = -radius * 1.5;
+  shadowCamera.near = radius * 0.5;
+  shadowCamera.far = radius * 6;
+  shadowCamera.updateProjectionMatrix();
+  sunLight.shadow.bias = -0.0005;
+  sunLight.shadow.normalBias = radius * 0.002;
+
+  if (!shadowGround) {
+    shadowGround = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.ShadowMaterial({ opacity: 0.35 }));
+    shadowGround.receiveShadow = true;
+    shadowGround.raycast = () => {};
+    shadowGround.userData.viewerHelper = true;
+    scene.add(shadowGround);
+  }
+  shadowGround.visible = true;
+  shadowGround.scale.set(radius * 8, radius * 8, 1);
+  shadowGround.position.set(center.x, center.y, modelBounds.min.z - radius * 1e-3);
+}
+
+// Swaps every surface/mesh between its per-colour display material and its render
+// material. Called on every display-mode or render-quality change.
+function applyRenderedMaterials() {
+  const rendered = displayMode === 'rendered';
+  const full = rendered && renderQuality === 'full';
+  scene.environment = rendered ? environmentTexture() : null;
+  scene.environmentIntensity = 0.9;
+  renderer.toneMapping = rendered ? THREE.NeutralToneMapping : THREE.NoToneMapping;
+  hemi.intensity = rendered ? 0.35 : 1.6;
+  keyLight.intensity = rendered ? (full ? 0.6 : 1.1) : 2.2;
+  fillLight.intensity = rendered ? 0.3 : 0.9;
+  forEachMesh((mesh) => {
+    if (!shadedMaterialOf.has(mesh)) shadedMaterialOf.set(mesh, mesh.material);
+    mesh.material = rendered ? renderMaterialFor(mesh) : shadedMaterialOf.get(mesh);
+    mesh.castShadow = full;
+    mesh.receiveShadow = full;
+  });
+  if (!rendered) disposeRenderMaterials();
+  updateShadowRig();
+  for (const cache of [meshMaterials, lineMaterials, pointMaterials, flatMaterials]) {
+    for (const material of cache.values()) material.needsUpdate = true;
+  }
+}
+
 function applyModeToMaterial(material, mode) {
+  if (mode === 'rendered') mode = 'shaded';
   const ghosted = mode === 'ghosted';
   material.wireframe = mode === 'wireframe';
   material.transparent = ghosted;
@@ -462,8 +777,12 @@ function buildEdges() {
 }
 
 function applyDisplayMode() {
+  // The highlight holds copies of the materials being swapped; take it off and put it back.
+  const previous = picked;
+  unpick();
   for (const material of meshMaterials.values()) applyModeToMaterial(material, displayMode);
-  if (picked) applyModeToMaterial(picked.mesh.material, displayMode);
+  applyRenderedMaterials();
+  if (previous) highlight(previous.target, previous.hit);
   if (displayMode === 'shaded_edges') {
     buildEdges();
     return;
@@ -482,12 +801,17 @@ function forEachMesh(fn) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Visibility (layers, curves, points)
+// Visibility (layers, object categories) and the selection filter
 // ---------------------------------------------------------------------------------------
 
 let layerVisible = [];
-let curvesVisible = true;
-let pointsVisible = true;
+const categoryVisible = Object.fromEntries(CATEGORIES.map((c) => [c, true]));
+const categoryPickable = Object.fromEntries(CATEGORIES.map((c) => [c, true]));
+let scaledParts = [];
+
+function categoryOf(obj) {
+  return CATEGORY_OF[obj.userData.objectType] || null;
+}
 
 function applyVisibility() {
   model.traverse((obj) => {
@@ -496,12 +820,40 @@ function applyVisibility() {
     const layerOk = layerVisible[attributes.layerIndex] !== false;
     // Objects hidden in Rhino (Hide command) stay hidden, as in the backend's /convert.
     const objectOk = attributes.visible !== false;
-    let typeOk = true;
-    if (obj.isLine) typeOk = curvesVisible;
-    else if (obj.isPoints) typeOk = pointsVisible;
+    const category = categoryOf(obj);
+    const typeOk = !category || categoryVisible[category] !== false;
     obj.visible = layerOk && objectOk && typeOk;
   });
+  if (picked && !isShownInModel(picked.target)) setPicked(null);
   requestRender();
+}
+
+function isShownInModel(obj) {
+  for (let o = obj; o && o !== model; o = o.parent) if (!o.visible) return false;
+  return true;
+}
+
+function setCategoryVisible(category, visible) {
+  if (!(category in categoryVisible)) {
+    log('warn', `Unknown object category "${category}"`);
+    return;
+  }
+  categoryVisible[category] = Boolean(visible);
+  applyVisibility();
+}
+
+function setCategoryPickable(category, pickable) {
+  if (!(category in categoryPickable)) {
+    log('warn', `Unknown object category "${category}"`);
+    return;
+  }
+  categoryPickable[category] = Boolean(pickable);
+  if (picked && !pickableTarget(picked.target)) setPicked(null);
+}
+
+function pickableTarget(target) {
+  const category = categoryOf(target);
+  return !category || categoryPickable[category] !== false;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -514,7 +866,7 @@ function drawableBounds(visibleOnly) {
   const box = new THREE.Box3();
   model.updateMatrixWorld(true);
   const visit = (obj) => {
-    if (!obj.geometry || obj.userData.viewerEdges || obj.userData.viewerHighlight || obj.isSprite) return;
+    if (!obj.geometry || obj.userData.viewerEdges || obj.userData.viewerHighlight || obj.isSprite || isScaledPart(obj)) return;
     if (!obj.geometry.boundingBox) obj.geometry.computeBoundingBox();
     if (obj.geometry.boundingBox.isEmpty()) return;
     _box.copy(obj.geometry.boundingBox).applyMatrix4(obj.matrixWorld);
@@ -563,7 +915,7 @@ function forEachVisibleVertex(fn) {
   const point = new THREE.Vector3();
   model.updateMatrixWorld(true);
   model.traverseVisible((obj) => {
-    if (!obj.geometry || obj.userData.viewerEdges || obj.userData.viewerHighlight || obj.isSprite) return;
+    if (!obj.geometry || obj.userData.viewerEdges || obj.userData.viewerHighlight || obj.isSprite || isScaledPart(obj)) return;
     const position = obj.geometry.getAttribute('position');
     if (!position) return;
     for (let i = 0; i < position.count; i++) fn(point.fromBufferAttribute(position, i).applyMatrix4(obj.matrixWorld));
@@ -706,7 +1058,7 @@ function endPointer(event, allowPick) {
   pointerDown = null;
   if (!allowPick || !down || multiTouch) return;
   const moved = Math.hypot(event.clientX - down.x, event.clientY - down.y);
-  if (moved < TAP_MAX_MOVE_PX && performance.now() - down.t < TAP_MAX_MS) pickAt(event.clientX, event.clientY);
+  if (moved < TAP_MAX_MOVE_PX && performance.now() - down.t < TAP_MAX_MS) onTap(event.clientX, event.clientY);
 }
 
 function attachPointerListeners() {
@@ -715,19 +1067,93 @@ function attachPointerListeners() {
   canvas.addEventListener('pointercancel', (event) => endPointer(event, false));
 }
 
-function pickAt(clientX, clientY) {
+function onTap(clientX, clientY) {
+  if (measure.active) measureAt(clientX, clientY);
+  else pickAt(clientX, clientY);
+}
+
+// World units covered by one screen pixel at `point`.
+function unitsPerPixel(point) {
+  const height = appliedHeight || viewportHeight();
+  if (camera.isOrthographicCamera) return (camera.top - camera.bottom) / camera.zoom / height;
+  const distance = Math.max(point.distanceTo(camera.position), 1e-9);
+  return (2 * distance * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2)) / height;
+}
+
+function setRay(clientX, clientY) {
   const rect = canvas.getBoundingClientRect();
   const ndc = new THREE.Vector2(
     ((clientX - rect.left) / rect.width) * 2 - 1,
     -((clientY - rect.top) / rect.height) * 2 + 1,
   );
   raycaster.setFromCamera(ndc, camera);
+  raycaster.camera = camera;
+  const tolerance = unitsPerPixel(controls.target) * PICK_LINE_PX;
+  raycaster.params.Line.threshold = tolerance;
+  raycaster.params.Points.threshold = tolerance;
+}
+
+// The top-level block instance containing an object, if any.
+function instanceOf(obj) {
+  let instance = null;
+  for (let o = obj.parent; o && o !== modelRoot; o = o.parent) {
+    if (o.userData.objectType === 'InstanceReference' && o.userData.attributes) instance = o;
+  }
+  return instance;
+}
+
+// The Rhino object a drawn node belongs to: its annotation/hatch group, or the node.
+function ownerOf(node) {
+  if (node.userData.annotationPart && node.parent && ANNOTATION_TYPES.has(node.parent.userData.objectType)) return node.parent;
+  return node.userData.attributes ? node : null;
+}
+
+// Every visible node that may be hit, honouring the selection filter. `forMeasure` takes
+// every visible surface, mesh, curve and point instead.
+function pickCandidates(forMeasure) {
   const candidates = [];
-  model.traverseVisible((obj) => {
-    if (obj.isMesh && MESH_TYPES.has(obj.userData.objectType)) candidates.push(obj);
+  if (!modelRoot) return candidates;
+  modelRoot.traverseVisible((node) => {
+    if (node.userData.viewerEdges || node.userData.viewerHighlight) return;
+    const owner = ownerOf(node);
+    if (!owner) return;
+    const type = owner.userData.objectType;
+    if (forMeasure) {
+      if ((node.isMesh && MESH_TYPES.has(type)) || (node.isLine && type === 'Curve') || (node.isPoints && CATEGORY_OF[type] === 'points')) {
+        candidates.push(node);
+      }
+      return;
+    }
+    if (node.isSprite && type !== 'TextDot') return;
+    const inBlock = instanceOf(node);
+    const category = inBlock ? 'blocks' : CATEGORY_OF[type];
+    if (!category || categoryPickable[category] === false) return;
+    if (node.isMesh || node.isLine || node.isPoints || node.isSprite) candidates.push(node);
   });
-  const hit = raycaster.intersectObjects(candidates, false)[0];
-  setPicked(hit ? hit.object : null);
+  return candidates;
+}
+
+// Nearest hit, preferring a curve, point or annotation that lies on (or just in front of)
+// the surface under the finger: those are what a tap near an edge is meant for.
+function bestHit(hits) {
+  if (!hits.length) return null;
+  const surface = hits.find((h) => h.object.isMesh && !h.object.userData.annotationPart);
+  const thin = hits.find((h) => !(h.object.isMesh && !h.object.userData.annotationPart));
+  if (!surface) return thin;
+  if (!thin) return surface;
+  const slack = unitsPerPixel(surface.point) * PICK_LINE_PX;
+  return thin.distance <= surface.distance + slack ? thin : surface;
+}
+
+function pickAt(clientX, clientY) {
+  setRay(clientX, clientY);
+  const hit = bestHit(raycaster.intersectObjects(pickCandidates(false), false));
+  if (!hit) {
+    setPicked(null);
+    return;
+  }
+  const owner = ownerOf(hit.object);
+  setPicked(instanceOf(hit.object) || owner, hit.object);
 }
 
 function colorDistance(a, b) {
@@ -743,90 +1169,351 @@ function boxOutlineGeometry(box) {
   return geometry;
 }
 
-// The picked object's outline, drawn through everything: its hard edges (the geometry is
-// shared with shaded_edges mode) or, for a smooth closed mesh that has none or a mesh too
-// large to edge, its own bounding box. The emissive tint alone vanishes on light colours,
-// and an accent-coloured line on an accent-coloured object, so such objects get the
-// alternative colour.
-function highlightOutline(mesh) {
+function outlineMaterial(hex) {
+  return new THREE.LineBasicMaterial({
+    color: colorDistance(hex, HIGHLIGHT_COLOR) < HIGHLIGHT_MIN_CONTRAST ? HIGHLIGHT_ALT_COLOR : HIGHLIGHT_COLOR,
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false,
+  });
+}
+
+// A single mesh's outline, drawn through everything: its hard edges (the geometry is shared
+// with shaded_edges mode) or, for a smooth closed mesh that has none or a mesh too large to
+// edge, its own bounding box. The emissive tint alone vanishes on light colours, and an
+// accent-coloured line on an accent-coloured object, so such objects get the alternative
+// colour.
+function meshOutline(mesh, hex) {
   const edges = meshTriangles(mesh) <= EDGE_MAX_TRIANGLES ? edgeGeometryFor(mesh.geometry) : null;
   const shared = Boolean(edges && edges.getAttribute('position').count > 0);
   if (!shared && !mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
-  const hex = mesh.material.color.getHex();
-  const outline = new THREE.LineSegments(
-    shared ? edges : boxOutlineGeometry(mesh.geometry.boundingBox),
-    new THREE.LineBasicMaterial({
-      color: colorDistance(hex, HIGHLIGHT_COLOR) < HIGHLIGHT_MIN_CONTRAST ? HIGHLIGHT_ALT_COLOR : HIGHLIGHT_COLOR,
-      depthTest: false,
-      depthWrite: false,
-    }),
-  );
-  outline.renderOrder = 1;
-  outline.userData.viewerHighlight = true;
+  const outline = new THREE.LineSegments(shared ? edges : boxOutlineGeometry(mesh.geometry.boundingBox), outlineMaterial(hex));
   outline.userData.ownsGeometry = !shared;
-  outline.raycast = () => {};
   return outline;
+}
+
+// World-space bounds of an object without the zoom-dependent parts of annotations.
+function objectBounds(target) {
+  const box = new THREE.Box3();
+  const part = new THREE.Box3();
+  target.updateWorldMatrix(true, true);
+  target.traverse((node) => {
+    if (!node.geometry || node.userData.viewerEdges || node.userData.viewerHighlight || isScaledPart(node)) return;
+    if (node.isSprite) {
+      box.expandByPoint(node.getWorldPosition(new THREE.Vector3()));
+      return;
+    }
+    if (!node.geometry.boundingBox) node.geometry.computeBoundingBox();
+    if (node.geometry.boundingBox.isEmpty()) return;
+    box.union(part.copy(node.geometry.boundingBox).applyMatrix4(node.matrixWorld));
+  });
+  if (box.isEmpty()) box.setFromObject(target, true);
+  return box;
+}
+
+function highlightMaterial(node) {
+  const material = node.material.clone();
+  if (node.isMesh && !node.userData.annotationPart && material.emissive) {
+    material.emissive.setHex(HIGHLIGHT_COLOR);
+    material.emissiveIntensity = HIGHLIGHT_INTENSITY;
+  } else if (material.color) {
+    material.color.setHex(HIGHLIGHT_COLOR);
+  }
+  return material;
+}
+
+// Tints every drawn node of the target and outlines it: a lone surface or mesh by its
+// edges (following its transform), anything else by its bounding box.
+function highlight(target, hit) {
+  const swapped = [];
+  let outline;
+  target.traverse((node) => {
+    if (node.userData.viewerEdges || node.isSprite) return;
+    if (!(node.isMesh || node.isLine || node.isPoints) || !node.material) return;
+    swapped.push([node, node.material]);
+    node.material = highlightMaterial(node);
+  });
+  if (target.isMesh && MESH_TYPES.has(target.userData.objectType)) {
+    outline = meshOutline(target, swapped.length ? swapped[0][1].color.getHex() : HIGHLIGHT_COLOR);
+    target.add(outline);
+  } else {
+    const box = objectBounds(target);
+    outline = new THREE.LineSegments(boxOutlineGeometry(box), outlineMaterial(0));
+    outline.userData.ownsGeometry = true;
+    scene.add(outline);
+  }
+  outline.renderOrder = 3;
+  outline.userData.viewerHighlight = true;
+  outline.raycast = () => {};
+  picked = { target, hit, swapped, outline };
 }
 
 function unpick() {
   if (!picked) return;
-  const { mesh, baseMaterial, outline } = picked;
-  mesh.material.dispose();
-  mesh.material = baseMaterial;
-  mesh.remove(outline);
+  const { swapped, outline } = picked;
+  for (const [node, material] of swapped) {
+    node.material.dispose();
+    node.material = material;
+  }
+  if (outline.parent) outline.parent.remove(outline);
   outline.material.dispose();
   if (outline.userData.ownsGeometry) outline.geometry.dispose();
   picked = null;
 }
 
-function setPicked(mesh) {
+function setPicked(target, hit = null) {
   unpick();
-  if (mesh) {
-    const highlight = mesh.material.clone();
-    highlight.emissive.setHex(HIGHLIGHT_COLOR);
-    highlight.emissiveIntensity = HIGHLIGHT_INTENSITY;
-    const outline = highlightOutline(mesh);
-    picked = { mesh, baseMaterial: mesh.material, outline };
-    mesh.material = highlight;
-    mesh.add(outline);
-  }
+  if (target) highlight(target, hit);
   requestRender();
-  emit('objectPicked', mesh ? describeObject(mesh) : null);
+  emit('objectPicked', target ? describeObject(target, hit) : null);
 }
 
-// The top-level block instance containing a mesh, if any.
-function instanceOf(mesh) {
-  let instance = null;
-  for (let obj = mesh.parent; obj && obj !== modelRoot; obj = obj.parent) {
-    if (obj.userData.objectType === 'InstanceReference' && obj.userData.attributes) instance = obj;
-  }
-  return instance;
-}
+const ANNOTATION_LABELS = {
+  Aligned: 'Aligned dimension',
+  Rotated: 'Linear dimension',
+  Angular: 'Angular dimension',
+  Angular3pt: 'Angular dimension',
+  ArcLen: 'Arc length dimension',
+  Radius: 'Radius dimension',
+  Diameter: 'Diameter dimension',
+  Ordinate: 'Ordinate dimension',
+  CenterMark: 'Center mark',
+  Text: 'Text',
+  Leader: 'Leader',
+};
 
 // Block content is reported as its top-level instance, as Rhino selects it: the reference
-// carries the meaningful name, layer and user strings; the member's user strings fill gaps.
-function describeObject(mesh) {
-  const instance = instanceOf(mesh);
-  const subject = instance || mesh;
-  const attributes = subject.userData.attributes || {};
+// carries the meaningful name, layer and user strings; the hit member's user strings fill
+// gaps.
+function describeObject(target, hit) {
+  const attributes = target.userData.attributes || {};
   const layers = currentLayers();
   const layer = layers[attributes.layerIndex];
-  const box = new THREE.Box3().setFromObject(subject, true);
+  const box = objectBounds(target);
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
-  const userStrings = Object.fromEntries((mesh.userData.attributes || {}).userStrings || []);
+  const member = hit ? ownerOf(hit) : null;
+  const userStrings = Object.fromEntries(((member && member.userData.attributes) || {}).userStrings || []);
   Object.assign(userStrings, Object.fromEntries(attributes.userStrings || []));
+  const type = target.userData.objectType;
+  let subtype = '';
+  if (type === 'Annotation') subtype = ANNOTATION_LABELS[target.userData.annotationKind] || target.userData.annotationKind || '';
+  else if (type === 'Hatch') subtype = target.userData.hatchSolid ? 'Solid hatch' : 'Pattern hatch';
+  else if (type === 'TextDot') subtype = 'Text dot';
+  let text = type === 'Annotation' ? target.userData.text || '' : '';
+  if (type === 'TextDot') text = (attributes.geometry && attributes.geometry.text) || '';
   return {
     id: attributes.id ?? null,
     name: attributes.name || '',
-    objectType: instance ? 'InstanceReference' : mesh.userData.objectType,
-    blockName: instance ? instance.userData.blockName || '' : '',
+    objectType: type,
+    subtype,
+    text,
+    blockName: type === 'InstanceReference' ? target.userData.blockName || '' : '',
     layerIndex: attributes.layerIndex ?? -1,
     layerName: layer ? layer.name : '',
     userStrings,
     size: [size.x, size.y, size.z],
     center: [center.x, center.y, center.z],
   };
+}
+
+// ---------------------------------------------------------------------------------------
+// Caliper (measure mode)
+// ---------------------------------------------------------------------------------------
+
+const measure = {
+  active: false,
+  points: [],
+  snaps: [],
+  group: null,
+  label: null,
+  labelEntry: null,
+};
+
+function toScreen(point) {
+  const v = point.clone().project(camera);
+  const rect = canvas.getBoundingClientRect();
+  return new THREE.Vector2(rect.left + ((v.x + 1) / 2) * rect.width, rect.top + ((1 - v.y) / 2) * rect.height);
+}
+
+// The point a tap measures to: the nearest vertex of the hit triangle, curve segment or
+// point when it is within SNAP_PX of the finger, otherwise the hit point itself.
+function measureHitAt(clientX, clientY) {
+  setRay(clientX, clientY);
+  const hit = bestHit(raycaster.intersectObjects(pickCandidates(true), false));
+  if (!hit) return null;
+  const node = hit.object;
+  const finger = new THREE.Vector2(clientX, clientY);
+  const position = node.geometry.getAttribute('position');
+  const world = (index) => new THREE.Vector3().fromBufferAttribute(position, index).applyMatrix4(node.matrixWorld);
+
+  if (node.isPoints) return { point: world(hit.index), snap: 'point' };
+
+  const candidates = [];
+  if (node.isMesh && hit.face) {
+    candidates.push([world(hit.face.a), 'vertex'], [world(hit.face.b), 'vertex'], [world(hit.face.c), 'vertex']);
+  } else if (node.isLine && hit.index !== undefined) {
+    const last = position.count - 1;
+    for (const index of [hit.index, hit.index + 1]) {
+      if (index < 0 || index > last) continue;
+      candidates.push([world(index), index === 0 || index === last ? 'end' : 'vertex']);
+    }
+  }
+  let best = null;
+  let bestDistance = SNAP_PX;
+  for (const [point, snap] of candidates) {
+    const distance = toScreen(point).distanceTo(finger);
+    if (distance <= bestDistance) {
+      best = { point, snap };
+      bestDistance = distance;
+    }
+  }
+  if (best) return best;
+  const point = node.isLine ? (hit.pointOnLine || hit.point).clone() : hit.point.clone();
+  return { point, snap: node.isLine ? 'curve' : 'surface' };
+}
+
+function measureAt(clientX, clientY) {
+  const found = measureHitAt(clientX, clientY);
+  if (!found) return;
+  if (measure.points.length >= 2) {
+    measure.points = [];
+    measure.snaps = [];
+  }
+  measure.points.push(found.point);
+  measure.snaps.push(found.snap);
+  rebuildMeasureOverlay();
+  emitMeasure();
+}
+
+function disposeMeasureOverlay() {
+  if (!measure.group) return;
+  scene.remove(measure.group);
+  measure.group.traverse((node) => {
+    if (node.geometry) node.geometry.dispose();
+    if (node.material) {
+      if (node.material.map) node.material.map.dispose();
+      node.material.dispose();
+    }
+  });
+  measure.group = null;
+  measure.label = null;
+}
+
+function overlayMaterial(Type, options) {
+  const material = new Type({ depthTest: false, depthWrite: false, transparent: true, ...options });
+  material.toneMapped = false;
+  return material;
+}
+
+function labelSprite(text) {
+  const ctx = document.createElement('canvas').getContext('2d');
+  const fontPx = 44;
+  const font = `600 ${fontPx}px ui-monospace, "Roboto Mono", Menlo, Consolas, monospace`;
+  ctx.font = font;
+  const width = Math.ceil(ctx.measureText(text).width) + 32;
+  const height = fontPx + 24;
+  ctx.canvas.width = width;
+  ctx.canvas.height = height;
+  ctx.fillStyle = 'rgba(14,16,19,0.92)';
+  ctx.fillRect(0, 0, width, height);
+  ctx.strokeStyle = '#FFB020';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(1.5, 1.5, width - 3, height - 3);
+  ctx.font = font;
+  ctx.fillStyle = '#FFB020';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.fillText(text, width / 2, height / 2 + 2);
+  const texture = new THREE.CanvasTexture(ctx.canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(overlayMaterial(THREE.SpriteMaterial, { map: texture }));
+  sprite.userData.aspect = width / height;
+  sprite.renderOrder = 6;
+  return sprite;
+}
+
+function formatLength(value) {
+  const abs = Math.abs(value);
+  const digits = abs >= 1000 ? 1 : abs >= 1 ? 2 : 4;
+  return value.toFixed(digits);
+}
+
+function rebuildMeasureOverlay() {
+  disposeMeasureOverlay();
+  if (!measure.points.length) {
+    requestRender();
+    return;
+  }
+  const group = new THREE.Group();
+  group.userData.viewerHelper = true;
+  const [a, b] = measure.points;
+
+  const markers = new THREE.BufferGeometry().setFromPoints(measure.points);
+  const dots = new THREE.Points(markers, overlayMaterial(THREE.PointsMaterial, { color: MEASURE_COLOR, size: 12, sizeAttenuation: false }));
+  dots.renderOrder = 5;
+  group.add(dots);
+
+  if (b) {
+    const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]), overlayMaterial(THREE.LineBasicMaterial, { color: MEASURE_COLOR }));
+    line.renderOrder = 5;
+    group.add(line);
+    // Axis legs: X, then Y, then Z, from the first point.
+    const legs = [a, new THREE.Vector3(b.x, a.y, a.z), new THREE.Vector3(b.x, b.y, a.z), b];
+    const legLine = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(legs),
+      overlayMaterial(THREE.LineDashedMaterial, { color: MEASURE_LEG_COLOR, dashSize: 1, gapSize: 1, opacity: 0.8 }),
+    );
+    legLine.computeLineDistances();
+    legLine.userData.dashed = true;
+    legLine.renderOrder = 4;
+    group.add(legLine);
+    const label = labelSprite(formatLength(a.distanceTo(b)));
+    label.position.copy(a).add(b).multiplyScalar(0.5);
+    group.add(label);
+    measure.label = label;
+  }
+  scene.add(group);
+  measure.group = group;
+  requestRender();
+}
+
+// Keeps the distance label and the leg dashes a constant size on screen.
+function updateMeasureLabel() {
+  if (!measure.group) return;
+  if (measure.label) {
+    const upp = unitsPerPixel(measure.label.position);
+    measure.label.scale.set(LABEL_PX * measure.label.userData.aspect * upp, LABEL_PX * upp, 1);
+  }
+  for (const node of measure.group.children) {
+    if (!node.userData.dashed) continue;
+    const upp = unitsPerPixel(measure.points[0]);
+    node.material.dashSize = 8 * upp;
+    node.material.gapSize = 6 * upp;
+  }
+}
+
+function emitMeasure() {
+  const [a, b] = measure.points;
+  emit('measure', {
+    points: measure.points.map((p) => [p.x, p.y, p.z]),
+    snaps: measure.snaps.slice(),
+    distance: b ? a.distanceTo(b) : null,
+    delta: b ? [b.x - a.x, b.y - a.y, b.z - a.z] : null,
+  });
+}
+
+function clearMeasure() {
+  measure.points = [];
+  measure.snaps = [];
+  rebuildMeasureOverlay();
+  emitMeasure();
+}
+
+function setMeasureMode(active) {
+  measure.active = Boolean(active);
+  if (measure.active) setPicked(null);
+  clearMeasure();
 }
 
 // ---------------------------------------------------------------------------------------
@@ -967,9 +1654,15 @@ function buildScene(root) {
 
   root.traverse((obj) => {
     const attributes = obj.userData.attributes;
-    if (!attributes || !(obj.isMesh || obj.isLine || obj.isPoints)) return;
+    if (!attributes) return;
+    if (ANNOTATION_TYPES.has(obj.userData.objectType)) {
+      colorAnnotationParts(obj, displayColorHex(objectColorHex(attributes, layers)));
+      return;
+    }
+    if (!(obj.isMesh || obj.isLine || obj.isPoints)) return;
     loaderMaterials.add(obj.material);
     const hex = displayColorHex(objectColorHex(attributes, layers));
+    obj.userData.displayHex = hex;
     if (obj.isMesh) obj.material = meshMaterialFor(hex);
     else if (obj.isLine) obj.material = lineMaterialFor(hex);
     else obj.material = pointMaterialFor(hex, obj.geometry.hasAttribute('color'));
@@ -978,9 +1671,12 @@ function buildScene(root) {
   loader.materials = [];
 
   model.add(root);
+  scaledParts = collectScaledParts(root);
   layerVisible = layers.map((layer) => layer.visible !== false);
-  curvesVisible = true;
-  pointsVisible = true;
+  for (const category of CATEGORIES) {
+    categoryVisible[category] = true;
+    categoryPickable[category] = true;
+  }
   applyVisibility();
 
   const visibleBox = drawableBounds(true);
@@ -995,9 +1691,11 @@ function buildScene(root) {
 
 function computeStats(root, timings, lightCount) {
   const layers = root.userData.layers || [];
-  const counts = { meshes: 0, curves: 0, points: 0, pointClouds: 0, blocks: 0, lights: lightCount, other: 0 };
+  const counts = { meshes: 0, curves: 0, points: 0, pointClouds: 0, blocks: 0, lights: lightCount, annotations: 0, hatches: 0, other: 0 };
+  const categories = Object.fromEntries(CATEGORIES.map((category) => [category, 0]));
   let triangles = 0;
   let vertices = 0;
+  let curvePoints = 0;
   const layerCounts = new Array(layers.length).fill(0);
 
   for (const child of root.children) {
@@ -1007,7 +1705,10 @@ function computeStats(root, timings, lightCount) {
     else if (type === 'Point') counts.points += 1;
     else if (type === 'PointSet') counts.pointClouds += 1;
     else if (type === 'InstanceReference') counts.blocks += 1;
+    else if (type === 'Annotation') counts.annotations += 1;
+    else if (type === 'Hatch') counts.hatches += 1;
     else counts.other += 1;
+    if (CATEGORY_OF[type]) categories[CATEGORY_OF[type]] += 1;
   }
   root.traverse((obj) => {
     const attributes = obj.userData.attributes;
@@ -1016,6 +1717,11 @@ function computeStats(root, timings, lightCount) {
     }
   });
   root.traverseVisible((obj) => {
+    if (obj.isLine && obj.userData.objectType === 'Curve') {
+      const curve = obj.geometry.getAttribute('position');
+      if (curve) curvePoints += curve.count;
+      return;
+    }
     if (!obj.isMesh || !MESH_TYPES.has(obj.userData.objectType)) return;
     const position = obj.geometry.getAttribute('position');
     if (!position) return;
@@ -1048,6 +1754,7 @@ function computeStats(root, timings, lightCount) {
     ...counts,
     triangles,
     vertices,
+    curvePoints,
     layers: layers.map((layer, index) => ({
       index,
       name: layer.name || '',
@@ -1056,9 +1763,11 @@ function computeStats(root, timings, lightCount) {
       visible: layer.visible !== false,
       objectCount: layerCounts[index],
     })),
+    categories,
     unmeshed,
     bbox,
     units,
+    curveQuality: loader.curveQuality,
     timings,
     warnings,
   };
@@ -1066,7 +1775,8 @@ function computeStats(root, timings, lightCount) {
 
 function disposeObject(root) {
   root.traverse((obj) => {
-    if (obj.geometry) obj.geometry.dispose();
+    if (obj.geometry && !obj.geometry.userData.shared) obj.geometry.dispose();
+    if (obj.material && obj.material.userData && obj.material.userData.perObject) obj.material.dispose();
     if (obj.isSprite && obj.material) {
       if (obj.material.map) obj.material.map.dispose();
       obj.material.dispose();
@@ -1076,15 +1786,19 @@ function disposeObject(root) {
 
 function clear() {
   unpick();
+  if (measure.points.length) clearMeasure();
   if (modelRoot) {
     model.remove(modelRoot);
     disposeObject(modelRoot);
     modelRoot = null;
   }
+  scaledParts = [];
+  disposeAnnotationResources();
+  disposeRenderMaterials();
   edgeJob = null;
   for (const geometry of edgeGeometries.values()) geometry.dispose();
   edgeGeometries.clear();
-  for (const cache of [meshMaterials, lineMaterials, pointMaterials]) {
+  for (const cache of [meshMaterials, lineMaterials, pointMaterials, flatMaterials]) {
     for (const material of cache.values()) material.dispose();
     cache.clear();
   }
@@ -1096,6 +1810,7 @@ function clear() {
   modelCenter = new THREE.Vector3();
   modelRadius = 1;
   gridRadius = 0;
+  updateShadowRig();
   bootstrap.contentShown(false);
   requestRender();
 }
@@ -1122,8 +1837,10 @@ async function exportGlb() {
   // highlight, no display-mode flags) on a Y-up copy.
   const layers = modelRoot.userData.layers || [];
   const exportMaterials = new Map();
+  // Annotation and hatch parts take their group's colour.
+  const attributesOf = (obj) => obj.userData.attributes || (obj.parent && obj.parent.userData.attributes) || {};
   const materialFor = (obj) => {
-    const hex = objectColorHex(obj.userData.attributes || {}, layers);
+    const hex = objectColorHex(attributesOf(obj), layers);
     const vertexColors = Boolean(obj.isPoints && obj.material.vertexColors);
     const key = `${obj.type}:${hex}:${vertexColors}`;
     let clean = exportMaterials.get(key);
@@ -1144,7 +1861,8 @@ async function exportGlb() {
   }
   copy.traverse((obj) => {
     for (const child of [...obj.children]) {
-      if (child.userData.viewerEdges || child.userData.viewerHighlight) obj.remove(child);
+      // Labels and arrowheads are screen-sized textures and glyphs, not model geometry.
+      if (child.userData.viewerEdges || child.userData.viewerHighlight || isScaledPart(child)) obj.remove(child);
     }
   });
   copy.traverse((obj) => {
@@ -1229,13 +1947,43 @@ function installApi() {
       applyVisibility();
     },
     setCurvesVisible(visible) {
-      curvesVisible = Boolean(visible);
-      applyVisibility();
+      setCategoryVisible('curves', visible);
     },
     setPointsVisible(visible) {
-      pointsVisible = Boolean(visible);
-      applyVisibility();
+      setCategoryVisible('points', visible);
     },
+    setCategoryVisible,
+    setCategoryPickable,
+    // Applies to the next load(): curves are sampled while the file is parsed.
+    setCurveQuality(quality) {
+      if (!CURVE_QUALITIES.includes(quality)) {
+        log('warn', `Unknown curve quality "${quality}"`);
+        return;
+      }
+      loader.curveQuality = quality;
+    },
+    setRenderQuality(quality) {
+      if (!RENDER_QUALITIES.includes(quality)) {
+        log('warn', `Unknown render quality "${quality}"`);
+        return;
+      }
+      if (quality === renderQuality) return;
+      renderQuality = quality;
+      if (displayMode === 'rendered') {
+        // Rebuild the render materials with or without textures.
+        const previous = picked;
+        unpick();
+        forEachMesh((mesh) => {
+          if (shadedMaterialOf.has(mesh)) mesh.material = shadedMaterialOf.get(mesh);
+        });
+        disposeRenderMaterials();
+        applyRenderedMaterials();
+        if (previous) highlight(previous.target, previous.hit);
+      }
+      requestRender();
+    },
+    setMeasureMode,
+    clearMeasure,
     setGrid(visible) {
       gridVisible = Boolean(visible);
       if (grid) grid.visible = gridVisible;
