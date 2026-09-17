@@ -94,7 +94,38 @@ void main() {
       await tester.pumpAndSettle();
       expect(mode, DisplayMode.wireframe);
 
+      // Lighting belongs to the rendered mode and switches it on.
+      mode = null;
+      bool? lighting;
+      await tester.pumpWidget(
+        host(
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: ViewerToolbar(
+              displayMode: DisplayMode.shaded,
+              projection: Projection.perspective,
+              grid: true,
+              onFit: () {},
+              onView: (_) {},
+              onDisplayMode: (m) => mode = m,
+              onRenderQuality: (q) => quality = q,
+              onRenderLighting: (on) => lighting = on,
+              onLayers: () {},
+              onGrid: (_) {},
+              onProjection: (_) {},
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Display'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Lighting'));
+      await tester.pumpAndSettle();
+      expect(lighting, isFalse, reason: 'toggles from the default, on');
+      expect(mode, DisplayMode.rendered);
+
       // Textures & shadows also switches to the rendered mode.
+      mode = null;
       await tester.tap(find.text('Display'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Textures & shadows'));
@@ -732,6 +763,23 @@ void main() {
     await tester.tap(find.text('Mesh on server'));
     expect(meshed, 1);
     expect(find.textContaining('Save small'), findsOneWidget);
+
+    // Without a server and without a setup action: the Rhino advice only.
+    await tester.pumpWidget(
+      host(
+        UnmeshedBanner(
+          count: 2,
+          backendConfigured: false,
+          onMeshOnServer: () => meshed++,
+        ),
+      ),
+    );
+    expect(find.byType(FilledButton), findsNothing);
+    expect(find.byType(OutlinedButton), findsNothing);
+    expect(
+      find.text('re-save in Rhino with Save small unchecked'),
+      findsOneWidget,
+    );
 
     // Once the server-meshed copy is shown, the leftovers are what the
     // server could not mesh: no point offering the same round trip again.

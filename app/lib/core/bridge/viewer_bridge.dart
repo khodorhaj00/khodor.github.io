@@ -145,6 +145,10 @@ class ViewerBridge {
   Future<void> setRenderQuality(RenderQuality quality) =>
       _call('setRenderQuality', [quality.wireName]);
 
+  /// Rendered mode only: false shows the materials unlit (flat colours and
+  /// textures, no light or shadows).
+  Future<void> setRenderLighting(bool on) => _call('setRenderLighting', [on]);
+
   /// In measure mode a tap places a caliper point instead of selecting.
   Future<void> setMeasureMode(bool active) => _call('setMeasureMode', [active]);
 

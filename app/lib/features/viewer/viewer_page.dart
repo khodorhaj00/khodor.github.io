@@ -38,7 +38,7 @@ import 'widgets/stats_sheet.dart';
 import 'widgets/toolbar.dart';
 import 'widgets/unmeshed_banner.dart';
 
-enum _MenuAction { exportGlb, shareOriginal, info, diagnostics }
+enum _MenuAction { exportGlb, shareOriginal, info, settings, diagnostics }
 
 /// One `/mesh` round trip; mutated in place so the page can tell a status
 /// update for a stale job from one for the job on screen.
@@ -123,6 +123,7 @@ class _ViewerPageState extends State<ViewerPage> {
   PickedObject? _picked;
   DisplayMode _displayMode = DisplayMode.shaded;
   RenderQuality _renderQuality = RenderQuality.basic;
+  bool _renderLighting = true;
   Projection _projection = Projection.perspective;
   bool _grid = true;
   bool _triedBase64 = false;
@@ -444,6 +445,7 @@ class _ViewerPageState extends State<ViewerPage> {
     if (_renderQuality != RenderQuality.basic) {
       bridge.setRenderQuality(_renderQuality);
     }
+    if (!_renderLighting) bridge.setRenderLighting(false);
     if (_displayMode != DisplayMode.shaded) {
       bridge.setDisplayMode(_displayMode);
     }
@@ -721,6 +723,8 @@ class _ViewerPageState extends State<ViewerPage> {
             ready: _ready,
           );
         }
+      case _MenuAction.settings:
+        _openSettings();
       case _MenuAction.diagnostics:
         _showDiagnostics();
     }
@@ -1013,7 +1017,6 @@ class _ViewerPageState extends State<ViewerPage> {
                           backendConfigured: settings.hasBackend,
                           serverTried: _showingMeshed,
                           onMeshOnServer: _meshOnServer,
-                          onSetupServer: _openSettings,
                         ),
                       ),
                     ),
@@ -1055,6 +1058,7 @@ class _ViewerPageState extends State<ViewerPage> {
                 child: ViewerToolbar(
                   displayMode: _displayMode,
                   renderQuality: _renderQuality,
+                  renderLighting: _renderLighting,
                   projection: _projection,
                   grid: _grid,
                   measuring: _measuring,
@@ -1067,6 +1071,10 @@ class _ViewerPageState extends State<ViewerPage> {
                   onRenderQuality: (q) {
                     setState(() => _renderQuality = q);
                     _bridge?.setRenderQuality(q);
+                  },
+                  onRenderLighting: (on) {
+                    setState(() => _renderLighting = on);
+                    _bridge?.setRenderLighting(on);
                   },
                   onLayers: _showLayers,
                   // Always present, so the toolbar does not reflow when the
@@ -1179,6 +1187,10 @@ class _TopBar extends StatelessWidget {
                 value: _MenuAction.info,
                 enabled: stats != null,
                 child: const Text('Info'),
+              ),
+              const PopupMenuItem(
+                value: _MenuAction.settings,
+                child: Text('Settings'),
               ),
               // Always enabled: the report matters most when there is no
               // model and nothing else to look at.

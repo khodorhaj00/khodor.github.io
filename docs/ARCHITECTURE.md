@@ -41,7 +41,7 @@ vendor/three/addons/loaders/3DMLoader.js              PATCHED — see PATCHES.md
 vendor/three/addons/loaders/EXRLoader.js, libs/fflate.module.js   (deps of 3DMLoader)
 vendor/three/addons/exporters/GLTFExporter.js
 vendor/three/addons/environments/RoomEnvironment.js   (rendered display mode)
-vendor/rhino3dm/rhino3dm.js, rhino3dm.wasm             rhino3dm 8.32.2
+vendor/rhino3dm/rhino3dm.js, rhino3dm.wasm             rhino3dm 8.35.0 (the backend keeps npm 8.32.2)
 ```
 
 Page files: `index.html`, `viewer.css`, `viewer.js`, `annotations.js`, `PATCHES.md`.
@@ -86,7 +86,9 @@ Page files: `index.html`, `viewer.css`, `viewer.js`, `annotations.js`, `PATCHES.
   shine → roughness, transparency), falls back to the object's display colour, and lights
   the scene with a `RoomEnvironment` PMREM and neutral tone mapping. `setRenderQuality('full')`
   adds the material's embedded textures (decoded only then) and a world-fixed sun with a
-  shadow map and a shadow-catcher ground. Leaving the mode restores the per-colour
+  shadow map and a shadow-catcher ground. `setRenderLighting(false)` shows the same
+  materials unlit (`MeshBasicMaterial`: colour, texture, opacity; no environment, tone
+  mapping or shadows). Leaving the mode restores the per-colour
   materials exactly (kept in a WeakMap, not `userData`, which `clone()` JSON-copies).
 * **Annotations and hatches** (`annotations.js`): one `Group` per Rhino object carrying its
   attributes (`objectType` `Annotation` / `Hatch`), with parts tagged
@@ -95,11 +97,15 @@ Page files: `index.html`, `viewer.css`, `viewer.js`, `annotations.js`, `PATCHES.
   annotation plane with a canvas texture: white glyphs tinted by the object colour; the
   texture rides on a shared template material because clones copy `userData` as JSON) and
   `fill` (hatch triangulation; solid pattern index 0 at 0.85 opacity, other patterns 0.35,
-  polygon offset so coplanar geometry wins). Dimension text sits one text gap above the
-  dimension line and never reads upside down; text objects anchor top-left, leader text
-  middle-left/right at Rhino's own text point. rhino3dm cannot read the document's
-  model-space annotation scale, so text and arrowheads are never drawn smaller than 10 / 7
-  px (rescaled per frame); framing, bounds and the GLB export ignore those parts.
+  polygon offset so coplanar geometry wins). A label is an anchor (`text`) at the text point
+  holding the quad (`label`), which is centred on the text. Sizes, fonts (family, bold,
+  italic) and text justification are Rhino's (PATCHES.md, `annotations`); dimension text
+  sits one text gap above the dimension line, leader text at Rhino's own text point.
+  Labels whose style has *draw forward* (Rhino's default) are mirrored when seen from behind
+  their plane and turned half way round when they would read right to left, every frame.
+  Text and arrowheads are never drawn smaller than 10 / 7 px (rescaled per frame); framing,
+  bounds and the GLB export ignore those parts. Android has no Arial or Times: the canvas
+  asks for the Rhino font and falls back to the matching generic family.
 * Colors on `userData.attributes` from the loader: `attributes.objectColor` is `{r,g,b,a}`
   (0–255), `attributes.colorSource.name`, `attributes.layerIndex`, `attributes.name`,
   `attributes.id`, `attributes.userStrings` (array of `[key, value]` pairs) — verify the exact
@@ -160,6 +166,7 @@ All methods are synchronous or return a Promise; all results are reported throug
 | `viewer.setCategoryPickable(category, bool)` | Selection filter, same categories; anything inside a block instance follows `blocks`. Clears a pick that no longer qualifies. |
 | `viewer.setCurveQuality(q)` | `standard` `high` (default) `max`; applies to the next `load()` (curves are sampled while parsing). |
 | `viewer.setDisplayMode('rendered')` / `viewer.setRenderQuality(q)` | `basic` (default): file materials, image-based light. `full`: also textures and shadows. |
+| `viewer.setRenderLighting(bool)` | Rendered mode lighting, default on; off draws the materials unlit. |
 | `viewer.setMeasureMode(bool)` / `viewer.clearMeasure()` | Caliper on/off (either clears it and emits `measure` with no points); clear keeps the mode. |
 | `viewer.setGrid(bool)` | Default true. |
 | `viewer.setBackground(hexTop, hexBottom)` | Optional; defaults above. |
@@ -175,7 +182,7 @@ When it does not (desktop browser, Playwright tests) it pushes `{name, payload}`
 
 | Handler | Payload |
 |---|---|
-| `viewerReady` | `{ three: 'r186', rhino3dm: '8.32.2' }` — emitted once the worker has instantiated `rhino3dm` (the patched loader's `worker._ready`, see `PATCHES.md`), so the first real load only pays for parsing. Never emitted when initialisation fails: that is a `log` error, and every later `load()` answers `loadResult { ok: false }` instead of hanging. |
+| `viewerReady` | `{ three: 'r186', rhino3dm: '8.35.0' }` — emitted once the worker has instantiated `rhino3dm` (the patched loader's `worker._ready`, see `PATCHES.md`), so the first real load only pays for parsing. Never emitted when initialisation fails: that is a `log` error, and every later `load()` answers `loadResult { ok: false }` instead of hanging. |
 | `loadProgress` | `{ phase: 'fetch'|'parse'|'build', progress: 0..1 }` |
 | `loadResult` | `{ ok: true, name, stats }` or `{ ok: false, name, error }`. A fetch failure carries `error` = `HTTP <status> while fetching <url>` (or Chromium's `Failed to fetch`); the app's base64 fallback (§3.1) keys on those texts, so keep them. Bytes `rhino3dm` cannot read give `Not a valid or complete .3dm file`. |
 | `exportResult` | `{ ok: true, filename, base64 }` or `{ ok: false, error }` |
@@ -199,7 +206,7 @@ error }` and `exportGlb()` emits `exportResult { ok: false, error }` instead of 
   "annotations": 5, "hatches": 1, "other": 4,
   "categories": { "surfaces": 10, "meshes": 2, "curves": 218, "points": 2,
                   "annotations": 9, "hatches": 1, "blocks": 0 },
-  "curvePoints": 15621, "curveQuality": "high",
+  "curvePoints": 15621, "curveQuality": "high", "labels": 9,
   "layers": [ { "index": 0, "name": "Default", "fullPath": "Default", "color": "#RRGGBB",
                 "visible": true, "objectCount": 12 } ],
   "unmeshed": { "breps": 0, "extrusions": 0, "total": 0 },
@@ -210,7 +217,8 @@ error }` and `exportGlb()` emits `exportResult { ok: false, error }` instead of 
 }
 ```
 `categories` counts top-level objects (text dots count under `annotations` there but under
-`other` in the flat counts). `curvePoints` is the number of drawn curve vertices.
+`other` in the flat counts). `curvePoints` is the number of drawn curve vertices, `labels` the number of annotation
+labels.
 `warnings` is capped at 50 entries. `units` comes from `userData.settings.modelUnitSystem` (name
 without the `UnitSystem_` prefix) — verify against the loader output; fall back to `"Unknown"`.
 
@@ -248,7 +256,10 @@ Node + Playwright, no Flutter needed. `package.json` (devDependency `playwright@
    * Curve quality: `Rhino_Logo.3dm` has more `curvePoints` at `max` than `high` than
      `standard`.
    * `annotations.3dm` (optional, written by Rhino 8 with `fixtures/make_annotations.py`;
-     skipped when absent): 5 annotations, 2 hatches, and hiding either removes pixels.
+     skipped when absent): 5 annotations and 5 labels (two dimensions are measured by the
+     viewer because the file stores no text for them), 2 hatches, and hiding either removes
+     pixels.
+   * Rendered lighting off draws a different frame; on again restores the lit one.
 5. Hostile-WebView cases, each on its own page: `getContext` forced to fail, `viewer.js` aborted,
    `three.module.js` aborted (the import-map target), a forced context loss and restore
    (`WEBGL_lose_context`), a zero `window.innerWidth`, the `viewer.diagnostics()` shape, the
@@ -500,21 +511,22 @@ Kotlin rejects anything whose bytes do not start with the `.3dm` magic (toast + 
   recents list (name, size, relative date, `MESHED` badge, tap to open, swipe to delete).
   Drop hint text: "Also opens from Files, WhatsApp, Drive via *Open with*".
 * **Viewer**: full-screen WebView; top overlay bar: back, file name, chips `objects` `tris`,
-  overflow menu (Export GLB, Share original, Info, Diagnostics — the last always enabled, since
+  overflow menu (Export GLB, Share original, Info, Settings, Diagnostics — the last always enabled, since
   the report matters most when there is no model and nothing else to look at: it shows
   `viewer.diagnostics()` next to the asset and model URLs, recorded vs on-disk file size, the
   stage timeline with timings, engine versions and the recent event log, with one-tap Copy).
   Bottom toolbar: Fit · Views (popup; also the Orthographic and Grid switches) ·
-  Display mode (popup, including Rendered; also the "Textures & shadows" switch, which
-  turns Rendered on) · Layers (bottom sheet: checkbox + color swatch + count; all/none) ·
+  Display mode (popup, including Rendered; also the "Lighting" and "Textures & shadows"
+  switches, which turn Rendered on) · Layers (bottom sheet: checkbox + color swatch + count; all/none) ·
   Objects (bottom sheet: per category present in the file, a Show and a Select checkbox)
   · Caliper (toggle; while on, a panel above the toolbar replaces the picked-object card
   and shows the next step, P1/P2 with their snaps, the distance and unsigned ΔX/ΔY/ΔZ, with
   Clear and Close). The page re-applies render quality, display mode, category switches
   and caliper mode after every load, and sends the curve accuracy setting before it. Loading overlay with phase + progress bar. Banner when
-  `unmeshed.total > 0`: "N objects have no render mesh" + `Mesh on server` (if backend URL
-  configured; runs `/mesh`, saves `.meshed.3dm`, reloads) or `Set up server` (→ settings) and a
-  hint "or re-save in Rhino with Save small unchecked". The loading overlay names the stage
+  `unmeshed.total > 0`: "N objects have no render mesh" + `Mesh on server` (only when a backend
+  URL is configured; runs `/mesh`, saves `.meshed.3dm`, reloads) and the hint "re-save in
+  Rhino with Save small unchecked". Server meshing is optional and the only networked
+  feature, so the banner no longer advertises setting a server up. The loading overlay names the stage
   reached, the file, a determinate bar where a fraction exists and the last error reported.
   While `/mesh` runs the banner is replaced
   by a meshing banner (upload progress, then "waiting for Rhino.Compute", `Cancel` aborts the

@@ -83,6 +83,7 @@ void main() {
       await bridge.setCategoryPickable(ObjectCategory.surfaces, false);
       await bridge.setCurveQuality(CurveQuality.max);
       await bridge.setRenderQuality(RenderQuality.full);
+      await bridge.setRenderLighting(false);
       await bridge.setMeasureMode(true);
       await bridge.clearMeasure();
       await bridge.setGrid(false);
@@ -102,6 +103,7 @@ void main() {
         'window.viewer.setCategoryPickable("surfaces", false)',
         'window.viewer.setCurveQuality("max")',
         'window.viewer.setRenderQuality("full")',
+        'window.viewer.setRenderLighting(false)',
         'window.viewer.setMeasureMode(true)',
         'window.viewer.clearMeasure()',
         'window.viewer.setGrid(false)',

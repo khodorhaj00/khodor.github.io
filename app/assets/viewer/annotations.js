@@ -9,9 +9,10 @@ import * as THREE from 'three';
 // hatch. This module turns them into three.js objects: a Group per Rhino object carrying
 // the object's attributes, with parts that viewer.js colours like any other object.
 //
-// rhino3dm cannot read the document's model-space annotation scale, so a label or an
-// arrowhead is never drawn smaller than a few pixels (updateAnnotationScale()); zoomed in,
-// everything is drawn at the size stored in the file.
+// Sizes are the file's (text height and style lengths times the model-space scale, from
+// the worker). A label or an arrowhead is still never drawn smaller than a few pixels
+// (updateAnnotationScale()), and labels whose style says "draw forward" turn to read left
+// to right from the camera, as Rhino draws them.
 
 const FONT_PX = 40;
 const CAP_HEIGHT = 0.716; // Arial cap height as a fraction of the em
@@ -40,14 +41,24 @@ const v3 = (a) => new THREE.Vector3(a[0], a[1], a[2]);
 // Text
 // ---------------------------------------------------------------------------------------
 
-function textTexture(font, text, align) {
-  const key = `${font}\n${align}\n${text}`;
+// A CSS font list for a Rhino font name: the font itself when the phone has it, else the
+// closest generic family (Android ships sans-serif, serif and monospace faces).
+function fontStack(family) {
+  const name = (family || 'Arial').replace(/["\\]/g, '');
+  const mono = /courier|mono|consol/i.test(name);
+  const serif = !mono && !/sans/i.test(name) && /times|georgia|garamond|roman|serif|palatino|cambria|book/i.test(name);
+  return `"${name}", ${mono ? 'monospace' : serif ? 'serif' : 'Arial, Helvetica, sans-serif'}`;
+}
+
+function textTexture(style, text, align) {
+  const key = `${style.family}|${style.bold}|${style.italic}\n${align}\n${text}`;
   let entry = textures.get(key);
   if (entry) return entry;
   const lines = text.split(/\r\n|\r|\n/);
   const ctx = document.createElement('canvas').getContext('2d');
   let fontPx = FONT_PX;
-  const fontSpec = (px) => `${px}px "${font}", Arial, Helvetica, sans-serif`;
+  const weight = `${style.italic ? 'italic ' : ''}${style.bold ? 'bold ' : ''}`;
+  const fontSpec = (px) => `${weight}${px}px ${fontStack(style.family)}`;
   ctx.font = fontSpec(fontPx);
   let textWidth = Math.max(1, ...lines.map((line) => ctx.measureText(line).width));
   // Very long text is drawn with a smaller font so the texture stays within limits.
@@ -85,61 +96,63 @@ function templateMaterial(texture) {
   return material;
 }
 
-// The text quad, laid out in its own frame: +x reading direction, +y up, origin at the
-// anchor. The anchor is the annotation's text point; `valign` says which part of the text
-// sits on it ('above' = the last baseline sits one text gap above it, as Rhino draws
-// dimension text above the dimension line).
+// A label is an anchor (the annotation's text point, oriented +x reading direction, +y up)
+// holding the text quad, laid out in that frame and centred on the text so turning it to
+// read forward keeps it in place. `valign` says which part of the text sits on the anchor
+// ('above' = the last baseline one text gap above it, as Rhino draws dimension text).
 function buildLabel(g) {
   if (labelCount >= MAX_LABELS) return null;
   const label = g.label;
-  const tex = textTexture(g.font, g.text, label.align);
+  const tex = textTexture({ family: g.font, bold: Boolean(g.bold), italic: Boolean(g.italic) }, g.text, label.align);
   labelCount += 1;
   // World size of one texture pixel, from the cap height.
   const k = g.textHeight / (CAP_HEIGHT * tex.fontPx);
   const w = tex.width * k;
   const h = tex.height * k;
-  const blockTop = PAD_PX * k; // cap top of the first line, from the quad's top edge
-  const blockHeight = ((tex.lines - 1) * tex.lineHeight + tex.fontPx * CAP_HEIGHT) * k;
+  const capPx = tex.fontPx * CAP_HEIGHT;
+  const lastLinePx = (tex.lines - 1) * tex.lineHeight;
 
   let left;
   if (label.align === 'center') left = -w / 2;
   else if (label.align === 'right') left = -w + PAD_PX * k;
   else left = -PAD_PX * k;
-  let top;
-  switch (label.valign) {
-    case 'top': top = blockTop; break;
-    case 'middle': top = blockTop + blockHeight / 2; break;
-    case 'bottom': top = blockTop + blockHeight; break;
-    default: top = blockTop + blockHeight + g.textGap; break; // 'above'
-  }
+  // Distance from the quad's top edge down to the anchor, in texture pixels; the text block
+  // runs from the first line's cap top to the last line's baseline.
+  const anchorPx = {
+    top: PAD_PX,
+    middleOfTop: PAD_PX + capPx / 2,
+    bottomOfTop: PAD_PX + capPx,
+    middle: PAD_PX + (lastLinePx + capPx) / 2,
+    middleOfBottom: PAD_PX + lastLinePx + capPx / 2,
+    bottom: PAD_PX + lastLinePx + capPx,
+    bottomOfBox: PAD_PX + lastLinePx + capPx + tex.fontPx * 0.21,
+  };
+  const top = label.valign in anchorPx
+    ? anchorPx[label.valign] * k
+    : anchorPx.bottom * k + g.textGap; // 'above'
   let shift = 0;
   if (label.gap) shift = label.align === 'right' ? -g.textGap : g.textGap;
 
-  const geometry = new THREE.PlaneGeometry(w, h);
-  geometry.translate(left + w / 2 + shift, top - h / 2, 0);
-
-  // Reading direction: dimension text is turned so it never reads upside down, the way
-  // Rhino draws it (vertical text reads bottom to top).
-  const xAxis = v3(g.plane.xAxis);
-  const yAxis = v3(g.plane.yAxis);
   const normal = v3(g.normal);
   const dir = v3(label.dir).normalize();
-  if (label.valign === 'above') {
-    const angle = Math.atan2(dir.dot(yAxis), dir.dot(xAxis));
-    if (angle <= -Math.PI / 2 + 1e-6 || angle > Math.PI / 2 + 1e-6) dir.negate();
-  }
   const up = new THREE.Vector3().crossVectors(normal, dir).normalize();
 
   // The texture travels on the material: clones (block instances) share it, while their
   // userData is a JSON copy.
-  const mesh = new THREE.Mesh(geometry, templateMaterial(tex.texture));
-  mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(dir, up, new THREE.Vector3().crossVectors(dir, up)));
-  mesh.position.copy(v3(label.point));
-  mesh.renderOrder = 2;
-  mesh.userData.annotationPart = 'text';
-  mesh.userData.worldSize = g.textHeight;
-  mesh.userData.minPx = MIN_TEXT_PX;
-  return mesh;
+  const quad = new THREE.Mesh(new THREE.PlaneGeometry(w, h), templateMaterial(tex.texture));
+  quad.position.set(left + w / 2 + shift, top - h / 2, 0);
+  quad.renderOrder = 2;
+  quad.userData.annotationPart = 'label';
+
+  const anchor = new THREE.Object3D();
+  anchor.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(dir, up, new THREE.Vector3().crossVectors(dir, up)));
+  anchor.position.copy(v3(label.point));
+  anchor.userData.annotationPart = 'text';
+  anchor.userData.worldSize = g.textHeight;
+  anchor.userData.minPx = MIN_TEXT_PX;
+  anchor.userData.drawForward = g.drawForward !== false;
+  anchor.add(quad);
+  return anchor;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -342,11 +355,41 @@ export function buildHatch(obj) {
 // ---------------------------------------------------------------------------------------
 
 const _position = new THREE.Vector3();
+const _right = new THREE.Vector3();
+const _up = new THREE.Vector3();
+const _normal = new THREE.Vector3();
+const _camRight = new THREE.Vector3();
+const _camUp = new THREE.Vector3();
+const _toCamera = new THREE.Vector3();
+
+// Rhino's "draw forward": mirror a label seen from behind its plane, and turn it half way
+// round when it would read right to left (or top to bottom when vertical).
+function orientLabel(anchor, camera) {
+  const quad = anchor.children[0];
+  if (!quad) return;
+  anchor.updateWorldMatrix(true, false);
+  anchor.matrixWorld.extractBasis(_right, _up, _normal);
+  _position.setFromMatrixPosition(anchor.matrixWorld);
+  camera.matrixWorld.extractBasis(_camRight, _camUp, _toCamera);
+  if (camera.isPerspectiveCamera) _toCamera.setFromMatrixPosition(camera.matrixWorld).sub(_position);
+  let sx = _normal.dot(_toCamera) >= 0 ? 1 : -1;
+  let sy = 1;
+  const across = _right.dot(_camRight) * sx;
+  const upward = _right.dot(_camUp) * sx;
+  if (across < -1e-3 || (Math.abs(across) <= 1e-3 && upward < 0)) {
+    sx = -sx;
+    sy = -1;
+  }
+  if (quad.scale.x !== sx || quad.scale.y !== sy) quad.scale.set(sx, sy, 1);
+}
 
 // Keeps labels and arrowheads at least a few pixels tall. `parts` is the list collected
 // by collectScaledParts(); only visible parts are touched.
 export function updateAnnotationScale(parts, camera, viewportHeight) {
   if (!parts.length) return;
+  // The controls move the camera without refreshing its world matrix; the renderer only
+  // does that inside render(), after this runs.
+  camera.updateMatrixWorld();
   const orthoUnits = camera.isOrthographicCamera ? (camera.top - camera.bottom) / camera.zoom / viewportHeight : 0;
   const perspUnits = camera.isPerspectiveCamera ? (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2)) / viewportHeight : 0;
   for (const part of parts) {
@@ -357,8 +400,13 @@ export function updateAnnotationScale(parts, camera, viewportHeight) {
       unitsPerPx = perspUnits * Math.max(_position.distanceTo(camera.position), 1e-9);
     }
     const size = Math.max(part.userData.worldSize, part.userData.minPx * unitsPerPx);
-    const scale = part.userData.annotationPart === 'text' ? size / part.userData.worldSize : size;
-    if (Math.abs(part.scale.x - scale) > scale * 1e-3) part.scale.setScalar(scale);
+    const isText = part.userData.annotationPart === 'text';
+    const scale = isText ? size / part.userData.worldSize : size;
+    if (Math.abs(part.scale.x - scale) > scale * 1e-3) {
+      part.scale.setScalar(scale);
+      part.updateMatrixWorld();
+    }
+    if (isText && part.userData.drawForward) orientLabel(part, camera);
   }
 }
 
@@ -379,7 +427,15 @@ export function collectScaledParts(root) {
 // True for parts whose drawn size follows the zoom, which framing must ignore.
 export function isScaledPart(obj) {
   const part = obj.userData.annotationPart;
-  return part === 'text' || part === 'arrow';
+  return part === 'text' || part === 'label' || part === 'arrow';
+}
+
+// The annotation or hatch group a drawn part belongs to.
+export function annotationOwner(obj) {
+  for (let o = obj.parent; o; o = o.parent) {
+    if (ANNOTATION_TYPES.has(o.userData.objectType)) return o;
+  }
+  return null;
 }
 
 // Frees every label texture; called when the model is cleared.

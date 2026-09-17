@@ -5,6 +5,7 @@ import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import {
   ANNOTATION_TYPES,
+  annotationOwner,
   buildAnnotation,
   buildHatch,
   collectScaledParts,
@@ -25,7 +26,7 @@ const bootstrap = window.__viewerBoot;
 bootstrap.starting();
 const { emit, log } = bootstrap;
 
-const RHINO3DM_VERSION = '8.32.2';
+const RHINO3DM_VERSION = '8.35.0';
 const HIGHLIGHT_COLOR = 0xFFB020;
 const HIGHLIGHT_INTENSITY = 0.35;
 // Outline colour for objects too close to HIGHLIGHT_COLOR (8-bit RGB distance) for it to show.
@@ -477,7 +478,7 @@ function textMaterialFor(texture, hex) {
 
 // Colours the parts of an annotation or hatch group in the group's colour.
 function colorAnnotationParts(group, hex) {
-  for (const part of group.children) {
+  group.traverse((part) => {
     switch (part.userData.annotationPart) {
       case 'lines':
         part.material = lineMaterialFor(hex);
@@ -488,13 +489,13 @@ function colorAnnotationParts(group, hex) {
       case 'fill':
         part.material = flatMaterialFor(hex, part.userData.opacity);
         break;
-      case 'text':
+      case 'label':
         part.material = textMaterialFor(part.material.map, hex);
         break;
       default:
         break;
     }
-  }
+  });
 }
 
 // ---------------------------------------------------------------------------------------
@@ -503,6 +504,8 @@ function colorAnnotationParts(group, hex) {
 // ---------------------------------------------------------------------------------------
 
 let renderQuality = 'basic';
+// Off: the rendered mode shows the materials' own colours and textures, unlit.
+let renderLighting = true;
 let roomEnvironment = null;
 let sunLight = null;
 let shadowGround = null;
@@ -545,29 +548,35 @@ function loadTexture(texture, colour) {
   return map;
 }
 
-function buildRenderMaterial(data, fallbackHex, withTextures) {
-  const material = new THREE.MeshStandardMaterial({ side: THREE.DoubleSide, roughness: 0.45, metalness: 0 });
+function buildRenderMaterial(data, fallbackHex, withTextures, lit) {
+  const material = lit
+    ? new THREE.MeshStandardMaterial({ side: THREE.DoubleSide, roughness: 0.45, metalness: 0 })
+    : new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });
   if (!data) {
     material.color.setHex(fallbackHex);
     return material;
   }
+  // Only the lit material has these slots; the unlit one ignores them.
+  const setLit = (key, value) => {
+    if (lit) material[key] = value;
+  };
   if (data.pbrSupported && data.pbr) {
     const pbr = data.pbr;
     const base = pbr.baseColor || {};
     material.color.setRGB(unit(base.r, 1), unit(base.g, 1), unit(base.b, 1), THREE.SRGBColorSpace);
-    material.roughness = unit(pbr.roughness, 0.5);
-    material.metalness = unit(pbr.metallic, 0);
+    setLit('roughness', unit(pbr.roughness, 0.5));
+    setLit('metalness', unit(pbr.metallic, 0));
     material.opacity = unit(pbr.opacity, 1);
   } else {
     const diffuse = data.diffuseColor || { r: 255, g: 255, b: 255 };
     material.color.setRGB(diffuse.r / 255, diffuse.g / 255, diffuse.b / 255, THREE.SRGBColorSpace);
     // Rhino's legacy shine runs 0..255 (glossier is higher).
-    material.roughness = THREE.MathUtils.clamp(1 - (Number(data.shine) || 0) / 255, 0.08, 1);
-    material.metalness = THREE.MathUtils.clamp(Number(data.reflectivity) || 0, 0, 1) * 0.5;
+    setLit('roughness', THREE.MathUtils.clamp(1 - (Number(data.shine) || 0) / 255, 0.08, 1));
+    setLit('metalness', THREE.MathUtils.clamp(Number(data.reflectivity) || 0, 0, 1) * 0.5);
     material.opacity = 1 - unit(data.transparency, 0);
   }
   const emission = data.emissionColor;
-  if (emission) material.emissive.setRGB(emission.r / 255, emission.g / 255, emission.b / 255, THREE.SRGBColorSpace);
+  if (lit && emission) material.emissive.setRGB(emission.r / 255, emission.g / 255, emission.b / 255, THREE.SRGBColorSpace);
   material.transparent = material.opacity < 1;
   material.depthWrite = !material.transparent;
   material.name = data.name || '';
@@ -582,19 +591,19 @@ function buildRenderMaterial(data, fallbackHex, withTextures) {
           material.color.setRGB(1, 1, 1);
           break;
         case 'Bump':
-          material.bumpMap = loadTexture(texture, false);
+          if (lit) material.bumpMap = loadTexture(texture, false);
           break;
         case 'PBR_Roughness':
-          material.roughnessMap = loadTexture(texture, false);
+          if (lit) material.roughnessMap = loadTexture(texture, false);
           break;
         case 'PBR_Metallic':
-          material.metalnessMap = loadTexture(texture, false);
+          if (lit) material.metalnessMap = loadTexture(texture, false);
           break;
         case 'PBR_AmbientOcclusion':
           material.aoMap = loadTexture(texture, false);
           break;
         case 'PBR_Emission':
-          material.emissiveMap = loadTexture(texture, true);
+          if (lit) material.emissiveMap = loadTexture(texture, true);
           break;
         case 'Transparency':
         case 'PBR_Alpha':
@@ -616,10 +625,10 @@ function renderMaterialFor(mesh) {
   const materials = modelRoot ? modelRoot.userData.renderMaterials || [] : [];
   const data = index >= 0 ? materials[index] : null;
   const hex = mesh.userData.displayHex ?? 0xffffff;
-  const key = data ? `m${index}:${renderQuality}` : `c${hex}`;
+  const key = data ? `m${index}:${renderQuality}:${renderLighting}` : `c${hex}:${renderLighting}`;
   let material = renderMaterials.get(key);
   if (!material) {
-    material = buildRenderMaterial(data, hex, renderQuality === 'full');
+    material = buildRenderMaterial(data, hex, renderQuality === 'full', renderLighting);
     renderMaterials.set(key, material);
   }
   return material;
@@ -636,7 +645,7 @@ function disposeRenderMaterials() {
 }
 
 function updateShadowRig() {
-  const wantShadows = displayMode === 'rendered' && renderQuality === 'full' && !modelBounds.isEmpty();
+  const wantShadows = displayMode === 'rendered' && renderQuality === 'full' && renderLighting && !modelBounds.isEmpty();
   if (renderer.shadowMap.enabled !== wantShadows) {
     renderer.shadowMap.enabled = wantShadows;
     renderer.shadowMap.type = THREE.PCFShadowMap;
@@ -686,10 +695,11 @@ function updateShadowRig() {
 // material. Called on every display-mode or render-quality change.
 function applyRenderedMaterials() {
   const rendered = displayMode === 'rendered';
-  const full = rendered && renderQuality === 'full';
-  scene.environment = rendered ? environmentTexture() : null;
+  const lit = rendered && renderLighting;
+  const full = lit && renderQuality === 'full';
+  scene.environment = lit ? environmentTexture() : null;
   scene.environmentIntensity = 0.9;
-  renderer.toneMapping = rendered ? THREE.NeutralToneMapping : THREE.NoToneMapping;
+  renderer.toneMapping = lit ? THREE.NeutralToneMapping : THREE.NoToneMapping;
   hemi.intensity = rendered ? 0.35 : 1.6;
   keyLight.intensity = rendered ? (full ? 0.6 : 1.1) : 2.2;
   fillLight.intensity = rendered ? 0.3 : 0.9;
@@ -1104,7 +1114,7 @@ function instanceOf(obj) {
 
 // The Rhino object a drawn node belongs to: its annotation/hatch group, or the node.
 function ownerOf(node) {
-  if (node.userData.annotationPart && node.parent && ANNOTATION_TYPES.has(node.parent.userData.objectType)) return node.parent;
+  if (node.userData.annotationPart) return annotationOwner(node);
   return node.userData.attributes ? node : null;
 }
 
@@ -1696,6 +1706,7 @@ function computeStats(root, timings, lightCount) {
   let triangles = 0;
   let vertices = 0;
   let curvePoints = 0;
+  let labels = 0;
   const layerCounts = new Array(layers.length).fill(0);
 
   for (const child of root.children) {
@@ -1711,6 +1722,7 @@ function computeStats(root, timings, lightCount) {
     if (CATEGORY_OF[type]) categories[CATEGORY_OF[type]] += 1;
   }
   root.traverse((obj) => {
+    if (obj.userData.annotationPart === 'text') labels += 1;
     const attributes = obj.userData.attributes;
     if (attributes && attributes.layerIndex >= 0 && attributes.layerIndex < layerCounts.length) {
       layerCounts[attributes.layerIndex] += 1;
@@ -1755,6 +1767,7 @@ function computeStats(root, timings, lightCount) {
     triangles,
     vertices,
     curvePoints,
+    labels,
     layers: layers.map((layer, index) => ({
       index,
       name: layer.name || '',
@@ -1921,6 +1934,22 @@ function diagnostics() {
 // Public API
 // ---------------------------------------------------------------------------------------
 
+// Rebuilds the render materials after a quality or lighting change (with or without
+// textures, lit or not), keeping the current pick.
+function rebuildRenderedMaterials() {
+  if (displayMode === 'rendered') {
+    const previous = picked;
+    unpick();
+    forEachMesh((mesh) => {
+      if (shadedMaterialOf.has(mesh)) mesh.material = shadedMaterialOf.get(mesh);
+    });
+    disposeRenderMaterials();
+    applyRenderedMaterials();
+    if (previous) highlight(previous.target, previous.hit);
+  }
+  requestRender();
+}
+
 function installApi() {
   window.viewer = Object.freeze({
     load,
@@ -1969,18 +1998,12 @@ function installApi() {
       }
       if (quality === renderQuality) return;
       renderQuality = quality;
-      if (displayMode === 'rendered') {
-        // Rebuild the render materials with or without textures.
-        const previous = picked;
-        unpick();
-        forEachMesh((mesh) => {
-          if (shadedMaterialOf.has(mesh)) mesh.material = shadedMaterialOf.get(mesh);
-        });
-        disposeRenderMaterials();
-        applyRenderedMaterials();
-        if (previous) highlight(previous.target, previous.hit);
-      }
-      requestRender();
+      rebuildRenderedMaterials();
+    },
+    setRenderLighting(on) {
+      if (Boolean(on) === renderLighting) return;
+      renderLighting = Boolean(on);
+      rebuildRenderedMaterials();
     },
     setMeasureMode,
     clearMeasure,

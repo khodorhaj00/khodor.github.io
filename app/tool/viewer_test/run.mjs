@@ -480,6 +480,9 @@ function checkAnnotations(stats) {
   checkEqual(stats.categories.annotations, 5, 'annotations.3dm: categories.annotations');
   checkEqual(stats.categories.hatches, 2, 'annotations.3dm: categories.hatches');
   checkEqual(stats.meshes, 1, 'annotations.3dm: meshes');
+  // Two dimensions were written before Rhino ever drew them, so the file stores no text
+  // for them: the viewer measures them itself and still labels all five.
+  checkEqual(stats.labels, 5, 'annotations.3dm: labels (measured where the file has no text)');
   const warned = stats.warnings.filter((w) => /not implemented|could not be read/.test(w.message));
   checkEqual(warned.length, 0, 'annotations.3dm: no annotation/hatch conversion warnings');
 }
@@ -664,6 +667,12 @@ async function testRenderedMode(page) {
   const rendered = await modelSignature(page);
   check(rendered.drawn / rendered.total > BLANK_THRESHOLD && rendered.hash !== shaded.hash, `rendered: ${rendered.drawn} pixels drawn, differs from shaded`);
   await page.screenshot({ path: path.join(outDir, 'meshes_rendered.png') });
+  await page.evaluate(() => window.viewer.setRenderLighting(false));
+  const unlit = await modelSignature(page);
+  check(unlit.drawn / unlit.total > BLANK_THRESHOLD && unlit.hash !== rendered.hash, `rendered unlit: ${unlit.drawn} pixels drawn, differs from lit`);
+  await page.screenshot({ path: path.join(outDir, 'meshes_rendered_unlit.png') });
+  await page.evaluate(() => window.viewer.setRenderLighting(true));
+  checkEqual((await modelSignature(page)).hash, rendered.hash, 'rendered lit again: frame restored');
   await page.evaluate(() => window.viewer.setRenderQuality('full'));
   const full = await modelSignature(page);
   check(full.drawn / full.total > BLANK_THRESHOLD && full.hash !== rendered.hash, `rendered full: ${full.drawn} pixels drawn, shadows change the frame`);
@@ -1174,7 +1183,7 @@ async function testDiagnostics(page, expected) {
   const diagnostics = await page.evaluate(() => window.viewer.diagnostics());
   check(typeof diagnostics.userAgent === 'string' && /Chrome/.test(diagnostics.userAgent), `diagnostics: userAgent ${JSON.stringify(diagnostics.userAgent)}`);
   checkEqual(diagnostics.three, 'r186', 'diagnostics: three');
-  checkEqual(diagnostics.rhino3dm.version, '8.32.2', 'diagnostics: rhino3dm version');
+  checkEqual(diagnostics.rhino3dm.version, '8.35.0', 'diagnostics: rhino3dm version');
   checkEqual(diagnostics.rhino3dm.worker, 'ready', 'diagnostics: rhino3dm worker');
   check(diagnostics.webgl.webgl1 === true && diagnostics.webgl.webgl2 === true, `diagnostics: webgl1 ${diagnostics.webgl.webgl1}, webgl2 ${diagnostics.webgl.webgl2}`);
   check(
@@ -1328,7 +1337,7 @@ async function main() {
     await page.waitForFunction(() => (window.__viewerEvents || []).some((e) => e.name === 'viewerReady'));
     const ready = await page.evaluate(() => window.__viewerEvents.find((e) => e.name === 'viewerReady').payload);
     checkEqual(ready.three, 'r186', 'viewerReady: three');
-    checkEqual(ready.rhino3dm, '8.32.2', 'viewerReady: rhino3dm');
+    checkEqual(ready.rhino3dm, '8.35.0', 'viewerReady: rhino3dm');
 
     let meshesStats = null;
     for (const fixture of FIXTURES) {

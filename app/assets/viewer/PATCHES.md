@@ -1,6 +1,6 @@
 # Patches to vendored code
 
-Everything under `vendor/` is upstream code (three.js r186, rhino3dm 8.32.2) and must stay
+Everything under `vendor/` is upstream code (three.js r186, rhino3dm 8.35.0) and must stay
 byte-identical to upstream **except** the patches documented here, all of them in
 `vendor/three/addons/loaders/3DMLoader.js` and tagged `PATCH(<name>)` in the source. When
 upgrading three.js, re-apply every hunk of the combined diff at the end of this file.
@@ -127,7 +127,23 @@ drawings arrive without their dimensions, notes and fills.
 Worker side, in `extractObjectData`:
 
 * `Annotation` → `extractAnnotation()` returns `{ kind, text, plane, normal, textHeight,
-  textGap, font, lines, dimensionLine?, arrows, label }`. Linear (`Aligned`, `Rotated`)
+  textGap, font, bold, italic, drawForward, lines, dimensionLine?, arrows, label }`.
+  Sizes are Rhino's: with rhino3dm ≥ 8.35 the object's effective style
+  (`getDimensionStyle(parent)`, its property overrides applied), `getTextHeight(parent)`
+  and the model-space scale `getDimensionScale(parent)`, which multiplies the text height
+  and every style length (arrows, gaps, extension offsets, landings, centre marks). The font
+  is `getFont(parent)` plus the `\b`, `\i` and `\fN` runs of the rich text. Text Rhino has
+  not formatted yet (a file written before the dimension was ever drawn) is measured here —
+  the definition points along the dimension line, or the radius — times the style's length
+  factor, and `<>` in user text stands for that value. A linear dimension whose arrow points
+  coincide although its definition points do not is rebuilt from the definition points and
+  the dimension line point.
+  Text justification is not exposed by rhino3dm, but the style's own record
+  (`style.encode()`) ends in a fixed block whose int32 fields 98, 94, 90 and 86 bytes from
+  the end read `1`, vertical alignment (0 top … 6 bottom of box), horizontal alignment
+  (0 left, 1 centre, 2 right, 3 auto) and `1` — found by diffing Rhino 8 texts written in
+  every alignment and checked against Rhino 7 and 8 production files. When the two `1`
+  markers are not there the text falls back to Rhino's default, top left. Linear (`Aligned`, `Rotated`)
   dimensions are rebuilt from `points` (`defpt1/2`, `arrowpt1/2`, `dimline`, `textpt`)
   and the dimension style's offsets and arrowheads; radial ones from `centerpt`,
   `radiuspt`, `kneept`, `dimlinept`; leaders from their polyline and
@@ -298,24 +314,24 @@ override), not by the loader.
 +		dimstyleCache = new Map(); // PATCH(annotations)
 +
 +		try {
-+
-+			for ( let i = 0; i < cnt; i ++ ) {
-+
-+				const _object = objs.get( i );
  
 -			const _object = objs.get( i );
-+				const object = extractObjectData( _object, doc, subdivisionLevel );
++			for ( let i = 0; i < cnt; i ++ ) {
  
 -			const object = extractObjectData( _object, doc, subdivisionLevel );
-+				_object.delete();
++				const _object = objs.get( i );
  
 -			_object.delete();
-+				if ( object ) {
++				const object = extractObjectData( _object, doc, subdivisionLevel );
  
 -			if ( object ) {
-+					objects.push( object );
++				_object.delete();
  
 -				objects.push( object );
++				if ( object ) {
++
++					objects.push( object );
++
 +				}
  
  			}
@@ -434,7 +450,7 @@ override), not by the loader.
  	function extractProperties( object ) {
  
  		const result = {};
-@@ -1817,118 +1943,573 @@
+@@ -1817,118 +1943,704 @@
  
  	}
  
@@ -457,10 +473,10 @@ override), not by the loader.
 +	function curveTolerance( curve ) {
 +
 +		let diag = 0;
-+
-+		try {
  
 -			return [ curve.pointAtStart, curve.pointAtEnd ];
++		try {
++
 +			const box = curve.getBoundingBox();
 +			diag = Math.hypot( box.max[ 0 ] - box.min[ 0 ], box.max[ 1 ] - box.min[ 1 ], box.max[ 2 ] - box.min[ 2 ] );
 +			if ( typeof box.delete === 'function' ) box.delete();
@@ -486,10 +502,10 @@ override), not by the loader.
 +		const last = out[ out.length - 1 ];
 +		if ( last && last[ 0 ] === p[ 0 ] && last[ 1 ] === p[ 1 ] && last[ 2 ] === p[ 2 ] ) return;
 +		out.push( [ p[ 0 ], p[ 1 ], p[ 2 ] ] );
-+
-+	}
  
 -			return rc;
++	}
++
 +	function appendCurvePoints( curve, out, tol ) {
 +
 +		if ( curve instanceof rhino.LineCurve ) {
@@ -548,10 +564,11 @@ override), not by the loader.
 +		const owned = ! ( curve instanceof rhino.NurbsCurve );
 +		const nurbs = owned ? curve.toNurbsCurve() : curve;
 +		if ( ! nurbs ) return;
-+
-+		try {
  
 -			const pLine = curve.tryGetPolyline();
++		try {
+ 
+-			for ( let i = 0; i < pLine.count; i ++ ) {
 +			const params = spanParameters( nurbs );
 +			const limit = out.length + curveTolerances.maxPoints;
 +			// Straight spans need no subdivision; curved ones are always split a little so a
@@ -560,10 +577,9 @@ override), not by the loader.
 +			let previous = nurbs.pointAt( params[ 0 ] );
 +			pushPoint( out, previous );
  
--			for ( let i = 0; i < pLine.count; i ++ ) {
-+			for ( let s = 0; s + 1 < params.length; s ++ ) {
- 
 -				rc.push( pLine.get( i ) );
++			for ( let s = 0; s + 1 < params.length; s ++ ) {
++
 +				const next = nurbs.pointAt( params[ s + 1 ] );
 +				subdivideSpan( nurbs, params[ s ], previous, params[ s + 1 ], next, tol * tol, 0, minDepth, out, limit );
 +				pushPoint( out, next );
@@ -582,24 +598,24 @@ override), not by the loader.
 -		const domain = curve.domain;
 -		const divisions = pointCount - 1.0;
 +	}
-+
+ 
+-		for ( let j = 0; j < pointCount; j ++ ) {
 +	// The increasing, distinct knot values inside the curve's domain, plus both ends.
 +	function spanParameters( nurbs ) {
  
--		for ( let j = 0; j < pointCount; j ++ ) {
+-			const t = domain[ 0 ] + ( j / divisions ) * ( domain[ 1 ] - domain[ 0 ] );
 +		const domain = nurbs.domain;
 +		const eps = Math.abs( domain[ 1 ] - domain[ 0 ] ) * 1e-12;
 +		const params = [ domain[ 0 ] ];
 +		const knots = typeof nurbs.knots === 'function' ? nurbs.knots() : nurbs.knots;
  
--			const t = domain[ 0 ] + ( j / divisions ) * ( domain[ 1 ] - domain[ 0 ] );
-+		if ( knots ) {
- 
 -			if ( t === domain[ 0 ] || t === domain[ 1 ] ) {
-+			for ( let i = 0; i < knots.count; i ++ ) {
++		if ( knots ) {
  
 -				ts.push( t );
 -				continue;
++			for ( let i = 0; i < knots.count; i ++ ) {
++
 +				const k = knots.get( i );
 +				if ( k > params[ params.length - 1 ] + eps && k < domain[ 1 ] - eps ) params.push( k );
  
@@ -608,37 +624,37 @@ override), not by the loader.
 -			const tan = curve.tangentAt( t );
 -			const prevTan = curve.tangentAt( ts.slice( - 1 )[ 0 ] );
 +			if ( typeof knots.delete === 'function' ) knots.delete();
-+
-+		}
-+
-+		params.push( domain[ 1 ] );
-+		return params;
  
 -			// Duplicated from THREE.Vector3
 -			// How to pass imports to worker?
-+	}
++		}
  
 -			const tS = tan[ 0 ] * tan[ 0 ] + tan[ 1 ] * tan[ 1 ] + tan[ 2 ] * tan[ 2 ];
 -			const ptS = prevTan[ 0 ] * prevTan[ 0 ] + prevTan[ 1 ] * prevTan[ 1 ] + prevTan[ 2 ] * prevTan[ 2 ];
-+	function subdivideSpan( curve, t0, p0, t1, p1, tol2, depth, minDepth, out, limit ) {
++		params.push( domain[ 1 ] );
++		return params;
  
 -			const denominator = Math.sqrt( tS * ptS );
-+		if ( depth >= 10 || out.length >= limit ) return;
++	}
  
 -			let angle;
++	function subdivideSpan( curve, t0, p0, t1, p1, tol2, depth, minDepth, out, limit ) {
+ 
+-			if ( denominator === 0 ) {
++		if ( depth >= 10 || out.length >= limit ) return;
+ 
+-				angle = Math.PI / 2;
 +		const tm = ( t0 + t1 ) / 2;
 +		const pm = curve.pointAt( tm );
  
--			if ( denominator === 0 ) {
+-			} else {
 +		if ( depth >= minDepth ) {
- 
--				angle = Math.PI / 2;
++
 +			const dx = pm[ 0 ] - ( p0[ 0 ] + p1[ 0 ] ) / 2;
 +			const dy = pm[ 1 ] - ( p0[ 1 ] + p1[ 1 ] ) / 2;
 +			const dz = pm[ 2 ] - ( p0[ 2 ] + p1[ 2 ] ) / 2;
 +			if ( dx * dx + dy * dy + dz * dz <= tol2 ) return;
- 
--			} else {
++
 +		}
 +
 +		subdivideSpan( curve, t0, p0, tm, pm, tol2, depth + 1, minDepth, out, limit );
@@ -712,9 +728,7 @@ override), not by the loader.
 +		return name.startsWith( prefix ) ? name.substring( prefix.length ) : name;
 +
 +	}
- 
--				const theta = ( tan.x * prevTan.x + tan.y * prevTan.y + tan.z * prevTan.z ) / denominator;
--				angle = Math.acos( Math.max( - 1, Math.min( 1, theta ) ) );
++
 +	function tryGet( fn ) {
 +
 +		try {
@@ -745,233 +759,365 @@ override), not by the loader.
 +
 +	}
 +
++	// Bold / italic and the font a Rhino rich-text string asks for. getFont() reports the
++	// annotation's base font only, while the runs carry \b, \i and \fN.
++	function rtfStyle( rtf ) {
++
++		const result = { bold: false, italic: false, family: null };
++		if ( ! rtf || rtf.indexOf( '{\\rtf' ) !== 0 ) return result;
++		const fonts = {};
++		const table = /\{\\fonttbl((?:\{[^{}]*\})*)\}/.exec( rtf );
++		if ( table ) {
+ 
+-				const theta = ( tan.x * prevTan.x + tan.y * prevTan.y + tan.z * prevTan.z ) / denominator;
+-				angle = Math.acos( Math.max( - 1, Math.min( 1, theta ) ) );
++			for ( const m of table[ 1 ].matchAll( /\{\\f(\d+)[^ ;{}]*\s*([^;{}]+);?\}/g ) ) fonts[ m[ 1 ] ] = m[ 2 ].trim();
++
++		}
++
++		const body = table ? rtf.replace( table[ 0 ], '' ) : rtf;
++		result.bold = /\\b(?![a-z0-9])/.test( body );
++		result.italic = /\\i(?![a-z0-9])/.test( body );
++		// The last font switch before the first text run wins.
++		const used = [ ...body.matchAll( /\\f(\d+)(?![a-z0-9])/g ) ].map( ( m ) => m[ 1 ] );
++		if ( used.length ) result.family = fonts[ used[ used.length - 1 ] ] || null;
++		return result;
++
++	}
++
++	function fontOf( g, parentStyle, style ) {
++
++		const out = { family: 'Arial', bold: false, italic: false };
++		const f = tryGet( () => ( parentStyle && typeof g.getFont === 'function' ? g.getFont( parentStyle ) : style && style.getFont() ) );
++		if ( f ) {
++
++			if ( f.familyName ) out.family = f.familyName;
++			out.bold = Boolean( tryGet( () => f.bold ) );
++			out.italic = Boolean( tryGet( () => f.italic ) );
++			if ( typeof f.delete === 'function' ) f.delete();
++
++		}
++
++		const rtf = rtfStyle( tryGet( () => g.richText ) );
++		if ( rtf.family ) out.family = rtf.family;
++		out.bold = out.bold || rtf.bold;
++		out.italic = out.italic || rtf.italic;
++		return out;
++
++	}
++
++	// Text justification. rhino3dm exposes none, but a style's own record (encode()) ends
++	// with a fixed block whose int32 fields at 98, 94, 90 and 86 bytes from the end read
++	// 1, vertical alignment, horizontal alignment, 1 - the same in Rhino 7 and 8 files.
++	// Anything else falls back to Rhino's default, top left.
++	const TEXT_VALIGN = [ 'top', 'middleOfTop', 'bottomOfTop', 'middle', 'middleOfBottom', 'bottom', 'bottomOfBox' ];
++	const TEXT_HALIGN = [ 'left', 'center', 'right', 'left' ];
++
++	function textAlignment( style ) {
++
++		const fallback = { h: 'left', v: 'top' };
++		const encoded = style ? tryGet( () => style.encode() ) : null;
++		if ( ! encoded || ! encoded.data ) return fallback;
++		const bytes = base64ToBytes( encoded.data );
++		const n = bytes.length;
++		if ( n < 110 ) return fallback;
++		const view = new DataView( bytes.buffer, bytes.byteOffset, n );
++		const at = ( k ) => view.getInt32( n - k, true );
++		const v = at( 94 );
++		const h = at( 90 );
++		if ( at( 98 ) !== 1 || at( 86 ) !== 1 || ! ( v >= 0 && v < TEXT_VALIGN.length ) || ! ( h >= 0 && h < TEXT_HALIGN.length ) ) return fallback;
++		return { h: TEXT_HALIGN[ h ], v: TEXT_VALIGN[ v ] };
++
++	}
++
++	function formatMeasurement( value, style, prefix ) {
++
++		const factor = style && style.lengthFactor > 0 ? style.lengthFactor : 1;
++		return prefix + ( value * factor ).toFixed( 1 );
++
++	}
++
 +	function extractAnnotation( g, doc ) {
 +
 +		const kind = enumName( g.annotationType, 'AnnotationTypes_' ) || 'Unset';
-+		const style = dimstyleFor( doc, g.dimensionStyleId );
-+		const plane = g.plane;
-+		const origin = toXYZ( plane.origin ) || [ 0, 0, 0 ];
-+		const xAxis = vNormalize( toXYZ( plane.xAxis ) ) || [ 1, 0, 0 ];
-+		const yAxis = vNormalize( toXYZ( plane.yAxis ) ) || [ 0, 1, 0 ];
-+		const textHeight = style && style.textHeight > 0 ? style.textHeight : 1;
-+		const font = style ? tryGet( () => {
++		const parentStyle = dimstyleFor( doc, g.dimensionStyleId );
++		// rhino3dm >= 8.35 gives the object's effective style (its property overrides
++		// applied), its text height and the model-space scale Rhino multiplies every
++		// annotation length by; older builds fall back to the parent style.
++		const ownStyle = parentStyle && typeof g.getDimensionStyle === 'function' ? tryGet( () => g.getDimensionStyle( parentStyle ) ) : null;
 +
-+			const f = style.getFont();
-+			const family = f && f.familyName;
-+			if ( f && typeof f.delete === 'function' ) f.delete();
-+			return family;
++		try {
 +
-+		} ) : undefined;
++			const style = ownStyle || parentStyle;
++			let scale = parentStyle && typeof g.getDimensionScale === 'function' ? tryGet( () => g.getDimensionScale( parentStyle ) ) : undefined;
++			if ( ! ( scale > 0 ) ) scale = style && style.dimensionScale > 0 ? style.dimensionScale : 1;
++			let baseHeight = parentStyle && typeof g.getTextHeight === 'function' ? tryGet( () => g.getTextHeight( parentStyle ) ) : undefined;
++			if ( ! ( baseHeight > 0 ) ) baseHeight = style && style.textHeight > 0 ? style.textHeight : 1;
++			const textHeight = baseHeight * scale;
++			// A style length in model units: scaled, or `fallback` when the style has none.
++			const len = ( value, fallback ) => ( Number.isFinite( value ) && value >= 0 ? value * scale : fallback );
 +
-+		const out = {
-+			kind,
-+			text: tryGet( () => g.plainTextWithFields ) || tryGet( () => g.plainText ) || '',
-+			plane: { origin, xAxis, yAxis },
-+			normal: vNormalize( vCross( xAxis, yAxis ) ) || [ 0, 0, 1 ],
-+			textHeight,
-+			textGap: style && style.textGap >= 0 ? style.textGap : textHeight / 4,
-+			font: font || 'Arial',
-+			lines: [],
-+			arrows: [],
-+			label: null
-+		};
++			const plane = g.plane;
++			const origin = toXYZ( plane.origin ) || [ 0, 0, 0 ];
++			const xAxis = vNormalize( toXYZ( plane.xAxis ) ) || [ 1, 0, 0 ];
++			const yAxis = vNormalize( toXYZ( plane.yAxis ) ) || [ 0, 1, 0 ];
++			const font = fontOf( g, parentStyle, style );
 +
-+		const line = ( a, b ) => {
++			const out = {
++				kind,
++				text: tryGet( () => g.plainTextWithFields ) || tryGet( () => g.plainText ) || '',
++				plane: { origin, xAxis, yAxis },
++				normal: vNormalize( vCross( xAxis, yAxis ) ) || [ 0, 0, 1 ],
++				textHeight,
++				textGap: len( style && style.textGap, textHeight / 4 ),
++				font: font.family,
++				bold: font.bold,
++				italic: font.italic,
++				// Rhino's "draw forward": text turns to read left to right from the view.
++				drawForward: ! ( style && style.drawForward === false ),
++				lines: [],
++				arrows: [],
++				label: null
++			};
 +
-+			if ( a && b ) out.lines.push( a[ 0 ], a[ 1 ], a[ 2 ], b[ 0 ], b[ 1 ], b[ 2 ] );
++			// Text Rhino has not formatted yet (a file written before the annotation was
++			// ever drawn) is measured here; "<>" stands for the measurement.
++			const withMeasurement = ( value, prefix ) => {
 +
-+		};
++				const measured = formatMeasurement( value, style, prefix );
++				if ( ! out.text ) out.text = measured;
++				else if ( out.text.indexOf( '<>' ) >= 0 ) out.text = out.text.split( '<>' ).join( measured );
 +
-+		const arrow = ( tip, from, type, size ) => {
++			};
 +
-+			const dir = tip && from ? vNormalize( vSub( tip, from ) ) : null;
-+			if ( dir && type !== 'None' ) out.arrows.push( { tip, dir, type: type || 'SolidTriangle', size: size > 0 ? size : textHeight } );
++			const line = ( a, b ) => {
 +
-+		};
++				if ( a && b ) out.lines.push( a[ 0 ], a[ 1 ], a[ 2 ], b[ 0 ], b[ 1 ], b[ 2 ] );
 +
-+		const pts = tryGet( () => g.points );
++			};
 +
-+		switch ( kind ) {
++			const arrow = ( tip, from, type, size ) => {
 +
-+			case 'Aligned':
-+			case 'Rotated': {
++				const dir = tip && from ? vNormalize( vSub( tip, from ) ) : null;
++				if ( dir && type !== 'None' ) out.arrows.push( { tip, dir, type: type || 'SolidTriangle', size: size > 0 ? size : textHeight } );
 +
-+				const d1 = toXYZ( pts && pts.defpt1 );
-+				const d2 = toXYZ( pts && pts.defpt2 );
-+				const a1 = toXYZ( pts && pts.arrowpt1 );
-+				const a2 = toXYZ( pts && pts.arrowpt2 );
-+				const dimline = toXYZ( pts && pts.dimline );
-+				const textPoint = toXYZ( pts && pts.textpt );
-+				if ( ! a1 || ! a2 ) break;
++			};
 +
-+				const offset = style ? style.extensionLineOffset : 0;
-+				const extension = style ? style.extensionLineExtension : 0;
-+				const extensionLine = ( from, to, suppressed ) => {
++			const pts = tryGet( () => g.points );
 +
-+					const v = from ? vSub( to, from ) : null;
-+					const length = v ? vLength( v ) : 0;
-+					if ( suppressed || length < 1e-9 ) return;
-+					const u = vScale( v, 1 / length );
-+					line( vAdd( from, vScale( u, Math.min( offset, length ) ) ), vAdd( to, vScale( u, extension ) ) );
++			switch ( kind ) {
 +
-+				};
++				case 'Aligned':
++				case 'Rotated': {
 +
-+				extensionLine( d1, a1, style && style.suppressExtension1 );
-+				extensionLine( d2, a2, style && style.suppressExtension2 );
++					const d1 = toXYZ( pts && pts.defpt1 );
++					const d2 = toXYZ( pts && pts.defpt2 );
++					let a1 = toXYZ( pts && pts.arrowpt1 );
++					let a2 = toXYZ( pts && pts.arrowpt2 );
++					const dimline = toXYZ( pts && pts.dimline );
++					let textPoint = toXYZ( pts && pts.textpt );
++					if ( ! a1 || ! a2 ) break;
++					// Arrow points that coincide although the definition points do not (an
++					// aligned dimension whose cached layout is stale): rebuild them from the
++					// definition points and the dimension line point.
++					if ( d1 && d2 && dimline && vLength( vSub( a2, a1 ) ) < 1e-9 && vLength( vSub( d2, d1 ) ) > 1e-9 ) {
 +
-+				const axis = vNormalize( vSub( a2, a1 ) );
-+				if ( axis ) {
-+
-+					// The dimension line runs between the arrows and on to the text when the text
-+					// sits outside them.
-+					let t0 = 0;
-+					let t1 = vLength( vSub( a2, a1 ) );
-+					for ( const p of [ dimline, textPoint ] ) {
-+
-+						if ( ! p ) continue;
-+						const t = vDot( vSub( p, a1 ), axis );
-+						t0 = Math.min( t0, t );
-+						t1 = Math.max( t1, t );
++						const along = vNormalize( vSub( d2, d1 ) );
++						const rel = vSub( dimline, d1 );
++						const off = vSub( rel, vScale( along, vDot( rel, along ) ) );
++						a1 = vAdd( d1, off );
++						a2 = vAdd( d2, off );
++						textPoint = vScale( vAdd( a1, a2 ), 0.5 );
 +
 +					}
 +
-+					out.dimensionLine = [ ...vAdd( a1, vScale( axis, t0 ) ), ...vAdd( a1, vScale( axis, t1 ) ) ];
-+					const arrowSize = style ? style.arrowLength : textHeight;
-+					if ( ! ( style && style.suppressArrow1 ) ) arrow( a1, a2, enumName( style && style.arrowType1, 'ArrowheadTypes_' ), arrowSize );
-+					if ( ! ( style && style.suppressArrow2 ) ) arrow( a2, a1, enumName( style && style.arrowType2, 'ArrowheadTypes_' ), arrowSize );
++					const offset = len( style && style.extensionLineOffset, 0 );
++					const extension = len( style && style.extensionLineExtension, 0 );
++					const extensionLine = ( from, to, suppressed ) => {
++
++						const v = from ? vSub( to, from ) : null;
++						const length = v ? vLength( v ) : 0;
++						if ( suppressed || length < 1e-9 ) return;
++						const u = vScale( v, 1 / length );
++						line( vAdd( from, vScale( u, Math.min( offset, length ) ) ), vAdd( to, vScale( u, extension ) ) );
++
++					};
++
++					extensionLine( d1, a1, style && style.suppressExtension1 );
++					extensionLine( d2, a2, style && style.suppressExtension2 );
++
++					const axis = vNormalize( vSub( a2, a1 ) );
++					if ( axis ) {
++
++						// The dimension line runs between the arrows and on to the text when the
++						// text sits outside them.
++						let t0 = 0;
++						let t1 = vLength( vSub( a2, a1 ) );
++						for ( const p of [ dimline, textPoint ] ) {
++
++							if ( ! p ) continue;
++							const t = vDot( vSub( p, a1 ), axis );
++							t0 = Math.min( t0, t );
++							t1 = Math.max( t1, t );
++
++						}
++
++						out.dimensionLine = [ ...vAdd( a1, vScale( axis, t0 ) ), ...vAdd( a1, vScale( axis, t1 ) ) ];
++						const arrowSize = len( style && style.arrowLength, textHeight );
++						if ( ! ( style && style.suppressArrow1 ) ) arrow( a1, a2, enumName( style && style.arrowType1, 'ArrowheadTypes_' ), arrowSize );
++						if ( ! ( style && style.suppressArrow2 ) ) arrow( a2, a1, enumName( style && style.arrowType2, 'ArrowheadTypes_' ), arrowSize );
++						if ( d1 && d2 ) withMeasurement( Math.abs( vDot( vSub( d2, d1 ), axis ) ), '' );
++
++					}
++
++					out.label = { point: textPoint || vScale( vAdd( a1, a2 ), 0.5 ), dir: axis || xAxis, align: 'center', valign: 'above' };
++					break;
 +
 +				}
 +
-+				out.label = { point: textPoint || vScale( vAdd( a1, a2 ), 0.5 ), dir: axis || xAxis, align: 'center', valign: 'above' };
-+				break;
++				case 'Radius':
++				case 'Diameter': {
++
++					const center = toXYZ( pts && pts.centerpt );
++					const radius = toXYZ( pts && pts.radiuspt );
++					const dimline = toXYZ( pts && pts.dimlinept );
++					const knee = toXYZ( pts && pts.kneept ) || dimline;
++					if ( ! radius || ! dimline ) break;
++
++					line( radius, knee );
++					if ( vLength( vSub( dimline, knee ) ) > 1e-9 ) line( knee, dimline );
++					arrow( radius, knee, enumName( style && style.arrowType1, 'ArrowheadTypes_' ), len( style && style.arrowLength, textHeight ) );
++
++					const mark = len( style && style.centermarkSize, 0 );
++					if ( center && mark > 0 ) {
++
++						line( vAdd( center, vScale( xAxis, - mark ) ), vAdd( center, vScale( xAxis, mark ) ) );
++						line( vAdd( center, vScale( yAxis, - mark ) ), vAdd( center, vScale( yAxis, mark ) ) );
++
++					}
++
++					if ( center ) {
++
++						const r = vLength( vSub( radius, center ) );
++						withMeasurement( kind === 'Diameter' ? 2 * r : r, kind === 'Diameter' ? 'Ø' : 'R' );
++
++					}
++
++					const toText = vNormalize( vSub( dimline, knee ) ) || vNormalize( vSub( dimline, radius ) ) || xAxis;
++					out.label = { point: dimline, dir: xAxis, align: vDot( toText, xAxis ) >= 0 ? 'left' : 'right', valign: 'middle', gap: true };
++					break;
++
++				}
++
++				case 'Leader': {
++
++					const points = [];
++					if ( pts && typeof pts.length === 'number' ) {
++
++						for ( let i = 0; i < pts.length; i ++ ) {
++
++							const p = toXYZ( pts[ i ] );
++							if ( p ) points.push( p );
++
++						}
++
++					}
++
++					if ( points.length === 0 ) break;
++					for ( let i = 0; i + 1 < points.length; i ++ ) line( points[ i ], points[ i + 1 ] );
++					if ( points.length >= 2 ) {
++
++						arrow( points[ 0 ], points[ 1 ], enumName( style && style.leaderArrowType, 'ArrowheadTypes_' ), len( style && style.leaderArrowLength, textHeight ) );
++
++					}
++
++					const last = points[ points.length - 1 ];
++					const lastX = vDot( vSub( last, origin ), xAxis );
++					const textPoint2d = parentStyle ? tryGet( () => g.getTextPoint2d( parentStyle, scale ) ) : undefined;
++					let point = last;
++					let align = points.length >= 2 && vDot( vSub( last, points[ points.length - 2 ] ), xAxis ) < 0 ? 'right' : 'left';
++					let gap = true;
++
++					if ( textPoint2d && textPoint2d.length >= 2 && isFinite( textPoint2d[ 0 ] ) ) {
++
++						// Rhino's own text point already includes the landing and the text gap.
++						point = vAdd( origin, vAdd( vScale( xAxis, textPoint2d[ 0 ] ), vScale( yAxis, textPoint2d[ 1 ] ) ) );
++						align = textPoint2d[ 0 ] >= lastX ? 'left' : 'right';
++						gap = false;
++						const landing = len( style && style.leaderLandingLength, 0 );
++						if ( style && style.leaderHasLanding && landing > 0 ) {
++
++							const sign = align === 'left' ? 1 : - 1;
++							line( last, vAdd( last, vScale( xAxis, sign * landing ) ) );
++
++						}
++
++					}
++
++					out.label = { point, dir: xAxis, align, valign: 'middle', gap };
++					break;
++
++				}
++
++				case 'Text': {
++
++					const rotation = tryGet( () => g.textRotationRadians ) || 0;
++					const dir = rotation ? vAdd( vScale( xAxis, Math.cos( rotation ) ), vScale( yAxis, Math.sin( rotation ) ) ) : xAxis;
++					const justify = textAlignment( style );
++					out.label = { point: origin, dir, align: justify.h, valign: justify.v };
++					break;
++
++				}
++
++				default: {
++
++					// Angular, ordinate and centre marks: Rhino's own display lines, when rhino3dm
++					// can compute them for this type.
++					if ( parentStyle && typeof g.getDisplayLines === 'function' ) {
++
++						const result = tryGet( () => g.getDisplayLines( parentStyle, scale ) );
++						if ( result && result.lines ) {
++
++							for ( let i = 0; i < result.lines.size(); i ++ ) {
++
++								const l = result.lines.get( i );
++								line( toXYZ( l.from ), toXYZ( l.to ) );
++								if ( typeof l.delete === 'function' ) l.delete();
++
++							}
++
++							result.lines.delete();
++							if ( result.text_rect ) result.text_rect.delete();
++
++						}
++
++					}
++
++					let point = toXYZ( pts && ( pts.textpt || pts.textPoint || pts.dimlinept ) );
++					if ( ! point ) {
++
++						const box = tryGet( () => g.getTightBoundingBox() );
++						if ( box && box.min[ 0 ] <= box.max[ 0 ] ) point = vScale( vAdd( box.min, box.max ), 0.5 );
++						if ( box && typeof box.delete === 'function' ) box.delete();
++
++					}
++
++					out.label = { point: point || origin, dir: xAxis, align: 'center', valign: 'middle' };
++					break;
++
++				}
  
  			}
  
 -			if ( angle < 0.1 ) continue;
-+			case 'Radius':
-+			case 'Diameter': {
++			if ( ! out.text ) out.label = null;
++			return out;
 +
-+				const center = toXYZ( pts && pts.centerpt );
-+				const radius = toXYZ( pts && pts.radiuspt );
-+				const dimline = toXYZ( pts && pts.dimlinept );
-+				const knee = toXYZ( pts && pts.kneept ) || dimline;
-+				if ( ! radius || ! dimline ) break;
++		} finally {
 +
-+				line( radius, knee );
-+				if ( vLength( vSub( dimline, knee ) ) > 1e-9 ) line( knee, dimline );
-+				arrow( radius, knee, enumName( style && style.arrowType1, 'ArrowheadTypes_' ), style ? style.arrowLength : textHeight );
-+
-+				const mark = style ? style.centermarkSize : 0;
-+				if ( center && mark > 0 ) {
-+
-+					line( vAdd( center, vScale( xAxis, - mark ) ), vAdd( center, vScale( xAxis, mark ) ) );
-+					line( vAdd( center, vScale( yAxis, - mark ) ), vAdd( center, vScale( yAxis, mark ) ) );
-+
-+				}
-+
-+				const toText = vNormalize( vSub( dimline, knee ) ) || vNormalize( vSub( dimline, radius ) ) || xAxis;
-+				out.label = { point: dimline, dir: xAxis, align: vDot( toText, xAxis ) >= 0 ? 'left' : 'right', valign: 'middle', gap: true };
-+				break;
-+
-+			}
-+
-+			case 'Leader': {
-+
-+				const points = [];
-+				if ( pts && typeof pts.length === 'number' ) {
-+
-+					for ( let i = 0; i < pts.length; i ++ ) {
-+
-+						const p = toXYZ( pts[ i ] );
-+						if ( p ) points.push( p );
-+
-+					}
-+
-+				}
-+
-+				if ( points.length === 0 ) break;
-+				for ( let i = 0; i + 1 < points.length; i ++ ) line( points[ i ], points[ i + 1 ] );
-+				if ( points.length >= 2 ) {
-+
-+					arrow( points[ 0 ], points[ 1 ], enumName( style && style.leaderArrowType, 'ArrowheadTypes_' ), style ? style.leaderArrowLength : textHeight );
-+
-+				}
- 
--			ts.push( t );
-+				const last = points[ points.length - 1 ];
-+				const lastX = vDot( vSub( last, origin ), xAxis );
-+				const textPoint2d = style ? tryGet( () => g.getTextPoint2d( style, 1 ) ) : undefined;
-+				let point = last;
-+				let align = points.length >= 2 && vDot( vSub( last, points[ points.length - 2 ] ), xAxis ) < 0 ? 'right' : 'left';
-+				let gap = true;
-+
-+				if ( textPoint2d && textPoint2d.length >= 2 && isFinite( textPoint2d[ 0 ] ) ) {
-+
-+					// Rhino's own text point already includes the landing and the text gap.
-+					point = vAdd( origin, vAdd( vScale( xAxis, textPoint2d[ 0 ] ), vScale( yAxis, textPoint2d[ 1 ] ) ) );
-+					align = textPoint2d[ 0 ] >= lastX ? 'left' : 'right';
-+					gap = false;
-+					if ( style && style.leaderHasLanding && style.leaderLandingLength > 0 ) {
-+
-+						const sign = align === 'left' ? 1 : - 1;
-+						line( last, vAdd( last, vScale( xAxis, sign * style.leaderLandingLength ) ) );
-+
-+					}
-+
-+				}
-+
-+				out.label = { point, dir: xAxis, align, valign: 'middle', gap };
-+				break;
-+
-+			}
-+
-+			case 'Text':
-+
-+				out.label = { point: origin, dir: xAxis, align: 'left', valign: 'top' };
-+				break;
-+
-+			default: {
-+
-+				// Angular, ordinate and centre marks: Rhino's own display lines, when rhino3dm
-+				// can compute them for this type.
-+				if ( style && typeof g.getDisplayLines === 'function' ) {
-+
-+					const result = tryGet( () => g.getDisplayLines( style, 1 ) );
-+					if ( result && result.lines ) {
-+
-+						for ( let i = 0; i < result.lines.size(); i ++ ) {
-+
-+							const l = result.lines.get( i );
-+							line( toXYZ( l.from ), toXYZ( l.to ) );
-+							if ( typeof l.delete === 'function' ) l.delete();
-+
-+						}
-+
-+						result.lines.delete();
-+						if ( result.text_rect ) result.text_rect.delete();
-+
-+					}
-+
-+				}
-+
-+				let point = toXYZ( pts && ( pts.textpt || pts.textPoint || pts.dimlinept ) );
-+				if ( ! point ) {
-+
-+					const box = tryGet( () => g.getTightBoundingBox() );
-+					if ( box && box.min[ 0 ] <= box.max[ 0 ] ) point = vScale( vAdd( box.min, box.max ), 0.5 );
-+					if ( box && typeof box.delete === 'function' ) box.delete();
-+
-+				}
-+
-+				out.label = { point: point || origin, dir: xAxis, align: 'center', valign: 'middle' };
-+				break;
-+
-+			}
++			if ( ownStyle && typeof ownStyle.delete === 'function' ) ownStyle.delete();
 +
 +		}
-+
-+		if ( ! out.text ) out.label = null;
-+		return out;
 +
 +	}
 +
@@ -994,11 +1140,14 @@ override), not by the loader.
 +
 +		let binary = '';
 +		for ( let i = 0; i < bytes.length; i += 0x8000 ) {
-+
+ 
+-			ts.push( t );
 +			binary += String.fromCharCode.apply( null, bytes.subarray( i, i + 0x8000 ) );
-+
-+		}
-+
+ 
+ 		}
+ 
+-		rc = ts.map( t => curve.pointAt( t ) );
+-		return rc;
 +		return btoa( binary );
 +
 +	}
@@ -1040,11 +1189,9 @@ override), not by the loader.
 +			if ( curve && typeof curve.delete === 'function' ) curve.delete();
 +			// Never look inside a record already handled (a polycurve's own segments).
 +			off += 11 + length;
- 
- 		}
- 
--		rc = ts.map( t => curve.pointAt( t ) );
--		return rc;
++
++		}
++
 +		if ( loops.length === 0 ) return null;
 +
 +		return {

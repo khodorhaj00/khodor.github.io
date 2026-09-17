@@ -69,7 +69,10 @@ unrelated to the app and untouched; everything for the viewer lives in `app/`, `
   colour, object count, search, all/none) · *Objects* (show/hide and a selection filter per type:
   surfaces, meshes, curves, points, annotations, hatches, blocks) · *Caliper* (tap two points,
   snapping to corners and curve ends: distance and ΔX/ΔY/ΔZ). Dimensions, text, leaders and hatches
-  are drawn; curves follow their true shape (*Settings → Curve accuracy*: Standard / High / Max). Tap an
+  are drawn at Rhino's sizes, fonts and alignment, and turn to stay readable; curves follow their
+  true shape (*Settings → Curve accuracy*: Standard / High / Max). *Display → Lighting* switches
+  the rendered mode's lighting off. Everything works offline; only the optional *Mesh on server*
+  needs a network. Tap an
   object for its name, layer, size in model units and user strings (a part inside a block reports the
   block instance and its block name, as Rhino selects it); objects hidden in Rhino stay hidden. Overflow
   menu: *Export GLB* (Y-up, shares the file), *Share original*, *Info* (stats, timings, warnings).
@@ -265,7 +268,7 @@ Full details (headers, node layout, error table, operational notes): [backend/RE
 
 ```
 app/                      Flutter Android app (package com.styro3d.rhino_viewer)
-  assets/viewer/          three.js r186 + rhino3dm 8.32.2 viewer page, vendored, offline (PATCHES.md)
+  assets/viewer/          three.js r186 + rhino3dm 8.35.0 viewer page, vendored, offline (PATCHES.md)
   lib/                    Dart: models, JS bridge, services, home / viewer / settings screens
   android/                Gradle with key.properties release signing, intent filters, MainActivity.kt
   tool/viewer_test/       Playwright harness for the viewer page (node run.mjs)

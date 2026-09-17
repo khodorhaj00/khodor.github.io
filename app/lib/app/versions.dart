@@ -3,5 +3,5 @@
 /// `viewerReady`; these are shown where no viewer is running.
 abstract final class VendoredVersions {
   static const String three = 'r186';
-  static const String rhino3dm = '8.32.2';
+  static const String rhino3dm = '8.35.0';
 }

@@ -147,7 +147,9 @@ class _SettingsPageState extends State<SettingsPage> {
       body: ListView(
         padding: const EdgeInsets.all(kGap * 2),
         children: [
-          const _Section('Meshing server'),
+          // Optional and the only part of the app that uses the network; left
+          // empty, the app works fully offline.
+          const _Section('Meshing server (optional)'),
           TextField(
             controller: _url,
             keyboardType: TextInputType.url,

@@ -11,7 +11,7 @@ class UnmeshedBanner extends StatelessWidget {
     required this.backendConfigured,
     this.serverTried = false,
     required this.onMeshOnServer,
-    required this.onSetupServer,
+    this.onSetupServer,
   });
 
   final int count;
@@ -22,10 +22,16 @@ class UnmeshedBanner extends StatelessWidget {
   /// not offered again.
   final bool serverTried;
   final VoidCallback onMeshOnServer;
-  final VoidCallback onSetupServer;
+
+  /// Offers "Set up server" when there is no server yet; null leaves the
+  /// banner with the Rhino advice only (server meshing is optional and needs
+  /// a network).
+  final VoidCallback? onSetupServer;
 
   @override
   Widget build(BuildContext context) {
+    final setup = onSetupServer;
+    final serverAction = !serverTried && (backendConfigured || setup != null);
     return Container(
       padding: const EdgeInsets.fromLTRB(kGap * 2, kGap, kGap, kGap),
       decoration: const BoxDecoration(
@@ -52,16 +58,16 @@ class UnmeshedBanner extends StatelessWidget {
                   style: const TextStyle(color: AppColors.text, fontSize: 13),
                 ),
                 Text(
-                  serverTried
-                      ? 're-save in Rhino with Save small unchecked'
-                      : 'or re-save in Rhino with Save small unchecked',
+                  serverAction
+                      ? 'or re-save in Rhino with Save small unchecked'
+                      : 're-save in Rhino with Save small unchecked',
                   style: const TextStyle(color: AppColors.muted, fontSize: 11),
                 ),
               ],
             ),
           ),
           const SizedBox(width: kGap),
-          if (serverTried)
+          if (!serverAction)
             const SizedBox.shrink()
           else if (backendConfigured)
             FilledButton(
@@ -69,9 +75,9 @@ class UnmeshedBanner extends StatelessWidget {
               style: FilledButton.styleFrom(minimumSize: const Size(0, 36)),
               child: const Text('Mesh on server'),
             )
-          else
+          else if (setup != null)
             OutlinedButton(
-              onPressed: onSetupServer,
+              onPressed: setup,
               style: OutlinedButton.styleFrom(minimumSize: const Size(0, 36)),
               child: const Text('Set up server'),
             ),

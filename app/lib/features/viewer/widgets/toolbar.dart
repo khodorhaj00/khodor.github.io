@@ -16,7 +16,7 @@ const EdgeInsets kViewerSnackBarMargin = EdgeInsets.fromLTRB(
 
 enum _ViewToggle { ortho, grid }
 
-enum _DisplayToggle { fullRender }
+enum _DisplayToggle { fullRender, lighting }
 
 /// Fit · Views · Display · Layers · Objects · Caliper (ARCHITECTURE.md §3.4).
 /// The Views menu also holds the Orthographic and Grid switches, the Display
@@ -26,6 +26,7 @@ class ViewerToolbar extends StatelessWidget {
     super.key,
     required this.displayMode,
     this.renderQuality = RenderQuality.basic,
+    this.renderLighting = true,
     required this.projection,
     required this.grid,
     this.measuring = false,
@@ -33,6 +34,7 @@ class ViewerToolbar extends StatelessWidget {
     required this.onView,
     required this.onDisplayMode,
     this.onRenderQuality,
+    this.onRenderLighting,
     required this.onLayers,
     this.onObjects,
     this.onMeasure,
@@ -42,6 +44,7 @@ class ViewerToolbar extends StatelessWidget {
 
   final DisplayMode displayMode;
   final RenderQuality renderQuality;
+  final bool renderLighting;
   final Projection projection;
   final bool grid;
   final bool measuring;
@@ -49,6 +52,7 @@ class ViewerToolbar extends StatelessWidget {
   final ValueChanged<ViewerView> onView;
   final ValueChanged<DisplayMode> onDisplayMode;
   final ValueChanged<RenderQuality>? onRenderQuality;
+  final ValueChanged<bool>? onRenderLighting;
   final VoidCallback onLayers;
   final VoidCallback? onObjects;
   final VoidCallback? onMeasure;
@@ -79,6 +83,12 @@ class ViewerToolbar extends StatelessWidget {
         onRenderQuality?.call(full ? RenderQuality.basic : RenderQuality.full);
         // Asking for textures and shadows means asking to see them.
         if (!full && displayMode != DisplayMode.rendered) {
+          onDisplayMode(DisplayMode.rendered);
+        }
+      case _DisplayToggle.lighting:
+        onRenderLighting?.call(!renderLighting);
+        // The switch belongs to the rendered mode.
+        if (displayMode != DisplayMode.rendered) {
           onDisplayMode(DisplayMode.rendered);
         }
     }
@@ -135,14 +145,20 @@ class ViewerToolbar extends StatelessWidget {
               itemBuilder: (_) => [
                 for (final mode in DisplayMode.values)
                   PopupMenuItem(value: mode, child: Text(mode.label)),
-                if (onRenderQuality != null) ...[
+                if (onRenderQuality != null || onRenderLighting != null)
                   const PopupMenuDivider(),
+                if (onRenderLighting != null)
+                  CheckedPopupMenuItem(
+                    value: _DisplayToggle.lighting,
+                    checked: renderLighting,
+                    child: const Text('Lighting'),
+                  ),
+                if (onRenderQuality != null)
                   CheckedPopupMenuItem(
                     value: _DisplayToggle.fullRender,
                     checked: renderQuality == RenderQuality.full,
                     child: const Text('Textures & shadows'),
                   ),
-                ],
               ],
               child: const _ToolButton(icon: Icons.tonality, label: 'Display'),
             ),

@@ -34,7 +34,7 @@ shared_preferences ^2.5.5
 Vendored into `app/assets/viewer/vendor/`, no CDN at runtime:
 
 - three.js r186 (0.186.0), MIT
-- rhino3dm 8.32.2, MIT (2.6 MB WebAssembly)
+- rhino3dm 8.35.0, MIT (2.7 MB WebAssembly; 8.35 is the first with per-annotation text height, scale and font)
 
 ---
 
