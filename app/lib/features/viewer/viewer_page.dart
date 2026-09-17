@@ -30,7 +30,9 @@ import 'widgets/diagnostics_sheet.dart';
 import 'widgets/error_panel.dart';
 import 'widgets/layers_sheet.dart';
 import 'widgets/loading_overlay.dart';
+import 'widgets/measure_panel.dart';
 import 'widgets/meshing_banner.dart';
+import 'widgets/objects_sheet.dart';
 import 'widgets/picked_card.dart';
 import 'widgets/stats_sheet.dart';
 import 'widgets/toolbar.dart';
@@ -120,9 +122,22 @@ class _ViewerPageState extends State<ViewerPage> {
   List<LayerInfo> _layers = const [];
   PickedObject? _picked;
   DisplayMode _displayMode = DisplayMode.shaded;
+  RenderQuality _renderQuality = RenderQuality.basic;
   Projection _projection = Projection.perspective;
   bool _grid = true;
   bool _triedBase64 = false;
+
+  /// The Objects sheet's switches; the page starts every load with all on.
+  final Map<ObjectCategory, bool> _categoryVisible = {
+    for (final category in ObjectCategory.values) category: true,
+  };
+  final Map<ObjectCategory, bool> _categoryPickable = {
+    for (final category in ObjectCategory.values) category: true,
+  };
+
+  /// Caliper mode: taps place measuring points instead of selecting.
+  bool _measuring = false;
+  MeasureResult _measure = MeasureResult.empty;
 
   /// File name (inside modelsDir) of the load in flight or last completed.
   String? _loadingFileName;
@@ -255,6 +270,7 @@ class _ViewerPageState extends State<ViewerPage> {
       bridge.onLoadResult.listen(_onLoadResult),
       bridge.onExportResult.listen(_onExportResult),
       bridge.onObjectPicked.listen((p) => setState(() => _picked = p)),
+      bridge.onMeasure.listen((m) => setState(() => _measure = m)),
       bridge.onLog.listen(_onLog),
     ]);
   }
@@ -310,6 +326,8 @@ class _ViewerPageState extends State<ViewerPage> {
       }
       // The page may have been retried or left while reading.
       if (!mounted || !identical(bridge, _bridge)) return;
+      // Curves are sampled while the file is parsed, so this goes first.
+      await bridge.setCurveQuality(_services.settings.value.curveQuality);
       await bridge.load(
         url: base64 == null ? '$_origin/files/$fileName' : null,
         base64: base64,
@@ -422,9 +440,22 @@ class _ViewerPageState extends State<ViewerPage> {
   void _applyDisplayState() {
     final bridge = _bridge;
     if (bridge == null) return;
+    // Before the display mode, so the rendered look is built once.
+    if (_renderQuality != RenderQuality.basic) {
+      bridge.setRenderQuality(_renderQuality);
+    }
     if (_displayMode != DisplayMode.shaded) {
       bridge.setDisplayMode(_displayMode);
     }
+    for (final category in ObjectCategory.values) {
+      if (_categoryVisible[category] == false) {
+        bridge.setCategoryVisible(category, false);
+      }
+      if (_categoryPickable[category] == false) {
+        bridge.setCategoryPickable(category, false);
+      }
+    }
+    if (_measuring) bridge.setMeasureMode(true);
     if (_projection != Projection.perspective) {
       bridge.setProjection(_projection);
     }
@@ -719,6 +750,35 @@ class _ViewerPageState extends State<ViewerPage> {
     );
   }
 
+  void _showObjects() {
+    final bridge = _bridge;
+    final stats = _stats;
+    if (bridge == null || stats == null) return;
+    ObjectsSheet.show(
+      context,
+      counts: stats.categories,
+      visible: _categoryVisible,
+      pickable: _categoryPickable,
+      onVisibleChanged: (category, visible) {
+        bridge.setCategoryVisible(category, visible);
+        setState(() => _categoryVisible[category] = visible);
+      },
+      onPickableChanged: (category, pickable) {
+        bridge.setCategoryPickable(category, pickable);
+        setState(() => _categoryPickable[category] = pickable);
+      },
+    );
+  }
+
+  void _setMeasuring(bool measuring) {
+    setState(() {
+      _measuring = measuring;
+      _measure = MeasureResult.empty;
+      if (measuring) _picked = null;
+    });
+    _bridge?.setMeasureMode(measuring);
+  }
+
   void _openSettings() => Navigator.of(context).push(
     MaterialPageRoute<void>(builder: (_) => SettingsPage(services: _services)),
   );
@@ -780,6 +840,7 @@ class _ViewerPageState extends State<ViewerPage> {
       _stats = null;
       _layers = const [];
       _picked = null;
+      _measure = MeasureResult.empty;
       _ready = null;
       _triedBase64 = false;
       _webViewGeneration++;
@@ -960,7 +1021,19 @@ class _ViewerPageState extends State<ViewerPage> {
               ),
             ),
           ),
-          if (picked != null && stats != null)
+          if (_measuring && stats != null)
+            Positioned(
+              left: kGap,
+              right: kGap,
+              bottom: kViewerToolbarHeight + bottomInset + kGap,
+              child: MeasurePanel(
+                result: _measure,
+                units: stats.units,
+                onClear: () => _bridge?.clearMeasure(),
+                onClose: () => _setMeasuring(false),
+              ),
+            )
+          else if (picked != null && stats != null)
             Positioned(
               left: kGap,
               right: kGap * 8,
@@ -981,15 +1054,27 @@ class _ViewerPageState extends State<ViewerPage> {
                 top: false,
                 child: ViewerToolbar(
                   displayMode: _displayMode,
+                  renderQuality: _renderQuality,
                   projection: _projection,
                   grid: _grid,
+                  measuring: _measuring,
                   onFit: () => _bridge?.fit(),
                   onView: (v) => _bridge?.setView(v),
                   onDisplayMode: (m) {
                     setState(() => _displayMode = m);
                     _bridge?.setDisplayMode(m);
                   },
+                  onRenderQuality: (q) {
+                    setState(() => _renderQuality = q);
+                    _bridge?.setRenderQuality(q);
+                  },
                   onLayers: _showLayers,
+                  // Always present, so the toolbar does not reflow when the
+                  // model arrives; both wait for a model.
+                  onObjects: _showObjects,
+                  onMeasure: () {
+                    if (_stats != null) _setMeasuring(!_measuring);
+                  },
                   onGrid: (v) {
                     setState(() => _grid = v);
                     _bridge?.setGrid(v);

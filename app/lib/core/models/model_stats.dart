@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'json_helpers.dart';
+import 'viewer_options.dart';
 
 /// One entry of `Stats.layers` (ARCHITECTURE.md §2.2). `index` is the
 /// position used by `viewer.setLayerVisible(index, ...)`.
@@ -140,7 +141,10 @@ class ModelStats {
     required this.pointClouds,
     required this.blocks,
     required this.lights,
+    this.annotations = 0,
+    this.hatches = 0,
     required this.other,
+    this.categories = const {},
     required this.layers,
     required this.unmeshed,
     required this.bbox,
@@ -159,7 +163,10 @@ class ModelStats {
     pointClouds: readInt(json['pointClouds']),
     blocks: readInt(json['blocks']),
     lights: readInt(json['lights']),
+    annotations: readInt(json['annotations']),
+    hatches: readInt(json['hatches']),
     other: readInt(json['other']),
+    categories: _readCategories(json['categories']),
     layers: [
       for (final layer in readList(json['layers']))
         if (layer is Map) LayerInfo.fromJson(Map<String, dynamic>.from(layer)),
@@ -176,6 +183,11 @@ class ModelStats {
           ViewerWarning.fromJson(Map<String, dynamic>.from(warning)),
     ],
   );
+
+  static Map<ObjectCategory, int> _readCategories(Object? value) => {
+    for (final entry in readMap(value).entries)
+      ?ObjectCategory.fromWire(entry.key): readInt(entry.value),
+  };
 
   /// Parses the string returned by `viewer.getStats()`, which is either a
   /// JSON object or the literal `"null"`. Returns null for anything that is
@@ -200,7 +212,15 @@ class ModelStats {
   final int pointClouds;
   final int blocks;
   final int lights;
+
+  /// Dimensions, text and leaders.
+  final int annotations;
+  final int hatches;
   final int other;
+
+  /// Top-level objects per category, for the Objects sheet. Empty when the
+  /// page predates categories.
+  final Map<ObjectCategory, int> categories;
   final List<LayerInfo> layers;
   final UnmeshedCounts unmeshed;
   final BoundingBox bbox;
@@ -217,6 +237,8 @@ class PickedObject {
     required this.id,
     required this.name,
     required this.objectType,
+    this.subtype = '',
+    this.text = '',
     this.blockName = '',
     required this.layerIndex,
     required this.layerName,
@@ -229,6 +251,8 @@ class PickedObject {
     id: readString(json['id']),
     name: readString(json['name']),
     objectType: readString(json['objectType']),
+    subtype: readString(json['subtype']),
+    text: readString(json['text']),
     blockName: readString(json['blockName']),
     layerIndex: readInt(json['layerIndex'], fallback: -1),
     layerName: readString(json['layerName']),
@@ -260,6 +284,13 @@ class PickedObject {
   final String name;
   final String objectType;
 
+  /// The kind of annotation or hatch (`Linear dimension`, `Solid hatch`,
+  /// ...); empty for other objects.
+  final String subtype;
+
+  /// The text an annotation or text dot shows; empty otherwise.
+  final String text;
+
   /// Name of the block definition when the tap landed inside a block
   /// instance: the viewer then describes the top-level instance
   /// (`objectType` `InstanceReference`). Empty for plain objects.
@@ -272,6 +303,20 @@ class PickedObject {
 
   String get displayName {
     if (name.isNotEmpty) return name;
-    return blockName.isNotEmpty ? blockName : objectType;
+    if (blockName.isNotEmpty) return blockName;
+    return typeLabel;
+  }
+
+  static const Map<String, String> _typeLabels = {
+    'Brep': 'Polysurface',
+    'PointSet': 'Point cloud',
+    'InstanceReference': 'Block instance',
+    'TextDot': 'Text dot',
+  };
+
+  /// Readable object type: the annotation or hatch kind when there is one.
+  String get typeLabel {
+    if (subtype.isNotEmpty) return subtype;
+    return _typeLabels[objectType] ?? objectType;
   }
 }

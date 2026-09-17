@@ -4,6 +4,7 @@ import '../../app/app_services.dart';
 import '../../app/format.dart';
 import '../../app/theme.dart';
 import '../../app/versions.dart';
+import '../../core/models/viewer_options.dart';
 import '../../core/services/backend_client.dart';
 import '../../core/services/settings_service.dart';
 
@@ -255,6 +256,30 @@ class _SettingsPageState extends State<SettingsPage> {
             ],
           ),
           const _Section('Viewer'),
+          const _Label('Curve accuracy'),
+          SegmentedButton<CurveQuality>(
+            segments: [
+              for (final quality in CurveQuality.values)
+                ButtonSegment(value: quality, label: Text(quality.label)),
+            ],
+            selected: {settings.curveQuality},
+            showSelectedIcon: false,
+            style: SegmentedButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: kGap),
+            ),
+            onSelectionChanged: (sel) =>
+                _save((s) => s.copyWith(curveQuality: sel.first)),
+          ),
+          const Padding(
+            padding: EdgeInsets.only(top: kGap / 2, bottom: kGap),
+            child: Text(
+              'How closely curves follow their true shape. Max is exact but '
+              'slower on files with thousands of curves. Takes effect the next '
+              'time a file is opened.',
+              style: TextStyle(color: AppColors.muted, fontSize: 12),
+            ),
+          ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             value: settings.hybridWebViewComposition,

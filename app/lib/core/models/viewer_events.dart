@@ -108,6 +108,64 @@ class ExportResult {
   final String? error;
 }
 
+/// What a caliper point snapped to.
+enum MeasureSnap {
+  vertex('Vertex'),
+  end('End'),
+  point('Point'),
+  curve('On curve'),
+  surface('On surface'),
+  unknown('Point');
+
+  const MeasureSnap(this.label);
+
+  final String label;
+
+  static MeasureSnap fromWire(String value) => values.firstWhere(
+    (snap) => snap.name == value,
+    orElse: () => MeasureSnap.unknown,
+  );
+}
+
+/// Payload of the `measure` event: the caliper's picked points (0, 1 or 2)
+/// and, once there are two, the distance and the X/Y/Z deltas in model
+/// units.
+class MeasureResult {
+  const MeasureResult({
+    required this.points,
+    required this.snaps,
+    this.distance,
+    this.delta,
+  });
+
+  factory MeasureResult.fromJson(Map<String, dynamic> json) {
+    final points = [for (final p in readList(json['points'])) readVec3(p)];
+    final snaps = [
+      for (final s in readList(json['snaps']))
+        MeasureSnap.fromWire(readString(s)),
+    ];
+    final distance = json['distance'];
+    return MeasureResult(
+      points: points,
+      snaps: [
+        for (var i = 0; i < points.length; i++)
+          i < snaps.length ? snaps[i] : MeasureSnap.unknown,
+      ],
+      distance: distance is num ? distance.toDouble() : null,
+      delta: json['delta'] is List ? readVec3(json['delta']) : null,
+    );
+  }
+
+  static const MeasureResult empty = MeasureResult(points: [], snaps: []);
+
+  final List<List<double>> points;
+  final List<MeasureSnap> snaps;
+  final double? distance;
+  final List<double>? delta;
+
+  bool get isComplete => distance != null && points.length >= 2;
+}
+
 enum ViewerLogLevel {
   info,
   warn,

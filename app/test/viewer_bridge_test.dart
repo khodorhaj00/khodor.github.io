@@ -44,6 +44,7 @@ void main() {
         'exportResult',
         'objectPicked',
         'log',
+        'measure',
       ]),
     );
   });
@@ -78,6 +79,12 @@ void main() {
       await bridge.setAllLayersVisible(true);
       await bridge.setCurvesVisible(false);
       await bridge.setPointsVisible(true);
+      await bridge.setCategoryVisible(ObjectCategory.annotations, false);
+      await bridge.setCategoryPickable(ObjectCategory.surfaces, false);
+      await bridge.setCurveQuality(CurveQuality.max);
+      await bridge.setRenderQuality(RenderQuality.full);
+      await bridge.setMeasureMode(true);
+      await bridge.clearMeasure();
       await bridge.setGrid(false);
       await bridge.setBackground('#1B1F26', '#0E1013');
       await bridge.exportGlb();
@@ -91,6 +98,12 @@ void main() {
         'window.viewer.setAllLayersVisible(true)',
         'window.viewer.setCurvesVisible(false)',
         'window.viewer.setPointsVisible(true)',
+        'window.viewer.setCategoryVisible("annotations", false)',
+        'window.viewer.setCategoryPickable("surfaces", false)',
+        'window.viewer.setCurveQuality("max")',
+        'window.viewer.setRenderQuality("full")',
+        'window.viewer.setMeasureMode(true)',
+        'window.viewer.clearMeasure()',
         'window.viewer.setGrid(false)',
         'window.viewer.setBackground("#1B1F26", "#0E1013")',
         'window.viewer.exportGlb()',
@@ -103,6 +116,21 @@ void main() {
         'shaded_edges',
         'wireframe',
         'ghosted',
+        'rendered',
+      ]);
+      expect(ObjectCategory.values.map((c) => c.wireName), [
+        'surfaces',
+        'meshes',
+        'curves',
+        'points',
+        'annotations',
+        'hatches',
+        'blocks',
+      ]);
+      expect(CurveQuality.values.map((q) => q.wireName), [
+        'standard',
+        'high',
+        'max',
       ]);
       expect(ViewerView.values.map((v) => v.name), [
         'iso',
@@ -114,6 +142,34 @@ void main() {
         'right',
       ]);
     });
+  });
+
+  test('measure events reach onMeasure', () async {
+    final events = <MeasureResult>[];
+    final sub = bridge.onMeasure.listen(events.add);
+    runner.handlers['measure']!([
+      {
+        'points': [
+          [0, 0, 0],
+          [3, 4, 0],
+        ],
+        'snaps': ['vertex', 'surface'],
+        'distance': 5,
+        'delta': [3, 4, 0],
+      },
+    ]);
+    runner.handlers['measure']!([
+      {'points': [], 'snaps': [], 'distance': null, 'delta': null},
+    ]);
+    await Future<void>.delayed(Duration.zero);
+    await sub.cancel();
+    expect(events, hasLength(2));
+    expect(events[0].isComplete, isTrue);
+    expect(events[0].distance, 5);
+    expect(events[0].snaps, [MeasureSnap.vertex, MeasureSnap.surface]);
+    expect(events[0].delta, [3, 4, 0]);
+    expect(events[1].points, isEmpty);
+    expect(events[1].isComplete, isFalse);
   });
 
   group('getStats', () {

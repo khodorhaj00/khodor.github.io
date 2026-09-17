@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import '../models/viewer_options.dart';
 import 'backend_client.dart';
 import 'key_value_store.dart';
 
@@ -12,6 +13,7 @@ class AppSettings {
     this.meshQuality = MeshQuality.standard,
     this.cacheCapMb = 1024,
     this.hybridWebViewComposition = true,
+    this.curveQuality = CurveQuality.high,
   });
 
   factory AppSettings.fromJson(Map<String, dynamic> json) => AppSettings(
@@ -22,6 +24,7 @@ class AppSettings {
     hybridWebViewComposition: json['hybridWebViewComposition'] is bool
         ? json['hybridWebViewComposition'] as bool
         : true,
+    curveQuality: CurveQuality.fromWire('${json['curveQuality'] ?? 'high'}'),
   );
 
   static const List<int> cacheCapChoicesMb = [256, 512, 1024, 2048, 4096];
@@ -36,6 +39,9 @@ class AppSettings {
   /// texture instead. See ARCHITECTURE.md 3.1.
   final bool hybridWebViewComposition;
 
+  /// How finely curves are drawn; applies to the next file opened.
+  final CurveQuality curveQuality;
+
   bool get hasBackend => backendUrl.trim().isNotEmpty;
 
   int get cacheCapBytes => cacheCapMb * 1024 * 1024;
@@ -46,6 +52,7 @@ class AppSettings {
     'meshQuality': meshQuality.wireName,
     'cacheCapMb': cacheCapMb,
     'hybridWebViewComposition': hybridWebViewComposition,
+    'curveQuality': curveQuality.wireName,
   };
 
   AppSettings copyWith({
@@ -54,6 +61,7 @@ class AppSettings {
     MeshQuality? meshQuality,
     int? cacheCapMb,
     bool? hybridWebViewComposition,
+    CurveQuality? curveQuality,
   }) => AppSettings(
     backendUrl: backendUrl ?? this.backendUrl,
     apiKey: apiKey ?? this.apiKey,
@@ -61,6 +69,7 @@ class AppSettings {
     cacheCapMb: cacheCapMb ?? this.cacheCapMb,
     hybridWebViewComposition:
         hybridWebViewComposition ?? this.hybridWebViewComposition,
+    curveQuality: curveQuality ?? this.curveQuality,
   );
 }
 

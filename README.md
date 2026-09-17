@@ -64,13 +64,17 @@ unrelated to the app and untouched; everything for the viewer lives in `app/`, `
   size cap in Settings, default 1 GB, LRU eviction). `MESHED` marks files with a server-meshed copy,
   which is preferred on open.
 * Viewer: one finger orbits, two fingers pan/zoom. Bottom bar: *Fit* · *Views* (Iso, Top, Bottom,
-  Front, Back, Left, Right — Rhino conventions, Z-up) · *Display* (Shaded, Shaded + edges, Wireframe,
-  Ghosted) · *Layers* (checkbox, colour, object count, search, all/none) · *Grid* · *Ortho*. Tap an
+  Front, Back, Left, Right — Rhino conventions, Z-up; *Orthographic* and *Grid* switches) · *Display*
+  (Shaded, Shaded + edges, Wireframe, Ghosted, Rendered; *Textures & shadows*) · *Layers* (checkbox,
+  colour, object count, search, all/none) · *Objects* (show/hide and a selection filter per type:
+  surfaces, meshes, curves, points, annotations, hatches, blocks) · *Caliper* (tap two points,
+  snapping to corners and curve ends: distance and ΔX/ΔY/ΔZ). Dimensions, text, leaders and hatches
+  are drawn; curves follow their true shape (*Settings → Curve accuracy*: Standard / High / Max). Tap an
   object for its name, layer, size in model units and user strings (a part inside a block reports the
   block instance and its block name, as Rhino selects it); objects hidden in Rhino stay hidden. Overflow
   menu: *Export GLB* (Y-up, shares the file), *Share original*, *Info* (stats, timings, warnings).
-  Materials from the file are ignored on purpose: colour is the object colour when the colour source is
-  *by object*, otherwise the layer colour; near-black colours (Rhino's default layer is black) are
+  Materials from the file are ignored in the shaded modes: colour is the object colour when the colour
+  source is *by object*, otherwise the layer colour (*Rendered* uses the file's materials); near-black colours (Rhino's default layer is black) are
   lightened on screen so parts do not vanish against the dark background — exports keep the file colour.
 
 ## Build locally

@@ -40,10 +40,11 @@ vendor/three/addons/controls/OrbitControls.js
 vendor/three/addons/loaders/3DMLoader.js              PATCHED — see PATCHES.md
 vendor/three/addons/loaders/EXRLoader.js, libs/fflate.module.js   (deps of 3DMLoader)
 vendor/three/addons/exporters/GLTFExporter.js
+vendor/three/addons/environments/RoomEnvironment.js   (rendered display mode)
 vendor/rhino3dm/rhino3dm.js, rhino3dm.wasm             rhino3dm 8.32.2
 ```
 
-Page files: `index.html`, `viewer.css`, `viewer.js`, `PATCHES.md`.
+Page files: `index.html`, `viewer.css`, `viewer.js`, `annotations.js`, `PATCHES.md`.
 
 * `index.html` uses an import map:
   `{"imports":{"three":"./vendor/three/three.module.js","three/addons/":"./vendor/three/addons/"}}`
@@ -59,14 +60,18 @@ Page files: `index.html`, `viewer.css`, `viewer.js`, `PATCHES.md`.
 * `Rhino3dmLoader.setLibraryPath('./vendor/rhino3dm/')`. The loader fetches `rhino3dm.js` +
   `rhino3dm.wasm` and runs decoding in a Blob Web Worker (needs an http(s) origin — provided by
   the Android `WebViewAssetLoader`, see §3). `setWorkerLimit(1)` (phones), `setSubdivisionLevel(2)`.
-* **Patch to 3DMLoader.js** (worker `extractObjectData`): when a `Brep` produces zero meshed faces,
+* **Patches to 3DMLoader.js** — five, all in `PATCHES.md`: `no-mesh`, `init-error`,
+  `invalid-file`, `curve-accuracy` (curves sampled to a chord tolerance relative to their
+  size, `loader.curveQuality` = `standard` / `high` / `max`, instead of 100 fixed points)
+  and `annotations` (dimensions, text, leaders and hatches are converted, see below).
+* **no-mesh** (worker `extractObjectData`): when a `Brep` produces zero meshed faces,
   or an `Extrusion.getMesh()` returns null, post a `warning` message
   `{ type: 'no mesh', objectType: 'Brep'|'Extrusion', guid, message }`. These land in
   `object.userData.warnings`. Document the patch (diff) in `PATCHES.md`.
 * Rhino is Z-up. Scene: `camera.up = (0,0,1)`. Views follow Rhino conventions:
   `top` looks down −Z, `front` looks along +Y (camera at −Y), `right` looks along −X (camera at +X),
   `iso` = Rhino Perspective default (camera at (−1,−1,+0.8)·d from the target, roughly).
-* Display modes: `shaded` (MeshStandardMaterial, flat lighting: hemisphere + 2 directional, no env
+* Display modes: `rendered` (below), `shaded` (MeshStandardMaterial, flat lighting: hemisphere + 2 directional, no env
   map), `shaded_edges` (shaded + `EdgesGeometry` at 30°, built in 30 ms slices between frames,
   visible meshes first; a mesh above 100 000 triangles keeps its shading only), `wireframe`,
   `ghosted` (opacity 0.35, depthWrite false). Materials from the file are **replaced** by
@@ -76,6 +81,25 @@ Page files: `index.html`, `viewer.css`, `viewer.js`, `PATCHES.md`.
   layer color. Near-black colours (relative luminance < 0.12 — Rhino's default layer is black)
   are lifted towards `#9AA1AA` **for display only**; `stats.layers[].color` and the GLB export
   keep the file's colour. `side = DoubleSide` (open surfaces).
+* **Rendered** display mode swaps every surface/mesh onto a material built from the file's
+  own render material (PBR values when the material has them, else diffuse colour,
+  shine → roughness, transparency), falls back to the object's display colour, and lights
+  the scene with a `RoomEnvironment` PMREM and neutral tone mapping. `setRenderQuality('full')`
+  adds the material's embedded textures (decoded only then) and a world-fixed sun with a
+  shadow map and a shadow-catcher ground. Leaving the mode restores the per-colour
+  materials exactly (kept in a WeakMap, not `userData`, which `clone()` JSON-copies).
+* **Annotations and hatches** (`annotations.js`): one `Group` per Rhino object carrying its
+  attributes (`objectType` `Annotation` / `Hatch`), with parts tagged
+  `userData.annotationPart`: `lines` (extension/dimension/leader lines, hatch outlines),
+  `arrow` (unit arrowhead shapes by dimension-style type), `text` (a quad in the
+  annotation plane with a canvas texture: white glyphs tinted by the object colour; the
+  texture rides on a shared template material because clones copy `userData` as JSON) and
+  `fill` (hatch triangulation; solid pattern index 0 at 0.85 opacity, other patterns 0.35,
+  polygon offset so coplanar geometry wins). Dimension text sits one text gap above the
+  dimension line and never reads upside down; text objects anchor top-left, leader text
+  middle-left/right at Rhino's own text point. rhino3dm cannot read the document's
+  model-space annotation scale, so text and arrowheads are never drawn smaller than 10 / 7
+  px (rescaled per frame); framing, bounds and the GLB export ignore those parts.
 * Colors on `userData.attributes` from the loader: `attributes.objectColor` is `{r,g,b,a}`
   (0–255), `attributes.colorSource.name`, `attributes.layerIndex`, `attributes.name`,
   `attributes.id`, `attributes.userStrings` (array of `[key, value]` pairs) — verify the exact
@@ -97,12 +121,22 @@ Page files: `index.html`, `viewer.css`, `viewer.js`, `PATCHES.md`.
   (10× the largest dimension, 20 divisions), on the Z=0 plane (rotate −90° about X), subtle
   (#2A3038 / #1F252C), toggleable.
 * Picking: pointerdown/pointerup with movement < 6 px and < 300 ms → `Raycaster` against
-  visible meshes → emit `objectPicked`. Highlight the picked mesh (emissive #FFB020 × 0.35 plus
+  visible surfaces, meshes, curves and points (12 px line/point tolerance), annotation and
+  hatch parts and text dots, honouring the selection filter (`setCategoryPickable`; block
+  content follows `blocks`); a curve, point or annotation on or just in front of a surface
+  wins over it → emit `objectPicked`. A lone surface/mesh is outlined by its edges, any
+  other target (block instance, annotation, curve) by a world-space bounding box; every
+  drawn node of the target is tinted. Highlight the picked mesh (emissive #FFB020 × 0.35 plus
   an outline drawn through everything: its hard edges, or its bounding box when it has none or is
   above the edge limit; outline colour #FFB020, or #3DA5FF when the object's own colour is within
   RGB distance 100 of it) until the next pick; tap on empty space clears and emits `null`. A hit
   inside a block instance reports the **top-level instance** (its name, layer, id and user
   strings, the member's user strings filling gaps), as Rhino selects blocks.
+* **Caliper** (`setMeasureMode(true)`): a tap places a point instead of picking — the
+  nearest vertex of the hit triangle, curve segment end or point when within 16 px of the
+  finger (`vertex` / `end` / `point`), otherwise the hit itself (`surface` / `curve`).
+  Two points draw an accent line, dashed X→Y→Z legs and a screen-sized distance label, and
+  emit `measure`; a third tap starts over. Loading or leaving the mode clears it.
 * Performance: `renderer.setPixelRatio(min(devicePixelRatio, 2))`; render on demand (only on
   controls `change`, load, resize, mode change) — no continuous RAF loop. Dispose geometry and
   materials on `clear()`.
@@ -121,7 +155,12 @@ All methods are synchronous or return a Promise; all results are reported throug
 | `viewer.setProjection(p)` | `perspective` (default) or `ortho`. Keeps target and framing. |
 | `viewer.setDisplayMode(m)` | `shaded` (default) `shaded_edges` `wireframe` `ghosted`. |
 | `viewer.setLayerVisible(index, bool)` / `viewer.setAllLayersVisible(bool)` | Layer index = index into `stats.layers`. |
-| `viewer.setCurvesVisible(bool)` / `viewer.setPointsVisible(bool)` | Default both true. |
+| `viewer.setCurvesVisible(bool)` / `viewer.setPointsVisible(bool)` | Default both true. Shorthands for the two categories below. |
+| `viewer.setCategoryVisible(category, bool)` | `surfaces` (Brep, Extrusion, SubD) `meshes` `curves` `points` (point, point cloud) `annotations` (dimensions, text, leaders, text dots) `hatches` `blocks` (whole instances). Every load starts with all visible. |
+| `viewer.setCategoryPickable(category, bool)` | Selection filter, same categories; anything inside a block instance follows `blocks`. Clears a pick that no longer qualifies. |
+| `viewer.setCurveQuality(q)` | `standard` `high` (default) `max`; applies to the next `load()` (curves are sampled while parsing). |
+| `viewer.setDisplayMode('rendered')` / `viewer.setRenderQuality(q)` | `basic` (default): file materials, image-based light. `full`: also textures and shadows. |
+| `viewer.setMeasureMode(bool)` / `viewer.clearMeasure()` | Caliper on/off (either clears it and emits `measure` with no points); clear keeps the mode. |
 | `viewer.setGrid(bool)` | Default true. |
 | `viewer.setBackground(hexTop, hexBottom)` | Optional; defaults above. |
 | `viewer.exportGlb()` | GLTFExporter binary of the visible model, Y-up (rotate −90° about X on a root group copy). Emits `exportResult`. |
@@ -140,7 +179,8 @@ When it does not (desktop browser, Playwright tests) it pushes `{name, payload}`
 | `loadProgress` | `{ phase: 'fetch'|'parse'|'build', progress: 0..1 }` |
 | `loadResult` | `{ ok: true, name, stats }` or `{ ok: false, name, error }`. A fetch failure carries `error` = `HTTP <status> while fetching <url>` (or Chromium's `Failed to fetch`); the app's base64 fallback (§3.1) keys on those texts, so keep them. Bytes `rhino3dm` cannot read give `Not a valid or complete .3dm file`. |
 | `exportResult` | `{ ok: true, filename, base64 }` or `{ ok: false, error }` |
-| `objectPicked` | `{ id, name, objectType, blockName, layerIndex, layerName, userStrings: {k: v}, size: [dx,dy,dz], center: [x,y,z] }` or `null`. `blockName` is `''` unless the hit lies inside a block instance; then the payload describes the top-level instance (`objectType: 'InstanceReference'`, `blockName` = definition name, size/center of the whole instance). |
+| `objectPicked` | `{ id, name, objectType, subtype, text, blockName, layerIndex, layerName, userStrings: {k: v}, size: [dx,dy,dz], center: [x,y,z] }` or `null`. `subtype` names an annotation (`Linear dimension`, `Leader`, ...) or hatch (`Solid hatch`) kind, `text` is what an annotation or text dot shows; both empty otherwise. `blockName` is `''` unless the hit lies inside a block instance; then the payload describes the top-level instance (`objectType: 'InstanceReference'`, `blockName` = definition name, size/center of the whole instance). |
+| `measure` | `{ points: [[x,y,z], ...], snaps: ['vertex'|'end'|'point'|'curve'|'surface', ...], distance: number|null, delta: [dx,dy,dz]|null }` — after every caliper tap, and `points: []` when it is cleared. Model units. |
 | `log` | `{ level: 'info'|'warn'|'error', message }` |
 
 Every start-up failure (WebGL refused, a script/stylesheet/import-map target that does not load,
@@ -155,7 +195,11 @@ error }` and `exportGlb()` emits `exportResult { ok: false, error }` instead of 
 ```json
 {
   "objects": 237, "meshes": 12, "triangles": 48210, "vertices": 26011,
-  "curves": 218, "points": 1, "pointClouds": 1, "blocks": 0, "lights": 2, "other": 4,
+  "curves": 218, "points": 1, "pointClouds": 1, "blocks": 0, "lights": 2,
+  "annotations": 5, "hatches": 1, "other": 4,
+  "categories": { "surfaces": 10, "meshes": 2, "curves": 218, "points": 2,
+                  "annotations": 9, "hatches": 1, "blocks": 0 },
+  "curvePoints": 15621, "curveQuality": "high",
   "layers": [ { "index": 0, "name": "Default", "fullPath": "Default", "color": "#RRGGBB",
                 "visible": true, "objectCount": 12 } ],
   "unmeshed": { "breps": 0, "extrusions": 0, "total": 0 },
@@ -165,6 +209,8 @@ error }` and `exportGlb()` emits `exportResult { ok: false, error }` instead of 
   "warnings": [ { "type": "no mesh", "message": "..." } ]
 }
 ```
+`categories` counts top-level objects (text dots count under `annotations` there but under
+`other` in the flat counts). `curvePoints` is the number of drawn curve vertices.
 `warnings` is capped at 50 entries. `units` comes from `userData.settings.modelUnitSystem` (name
 without the `UnitSystem_` prefix) — verify against the loader output; fall back to `"Unknown"`.
 
@@ -193,6 +239,16 @@ Node + Playwright, no Flutter needed. `package.json` (devDependency `playwright@
    * `exportGlb()` on `meshes.3dm` → base64 decodes to bytes starting with `glTF` magic, JSON
      chunk parses, `meshes.length > 0`.
    * Layer toggle: `setLayerVisible(idx('PARTS'), false)` → screenshot differs from before.
+   * Rendered mode (basic, full) draws and differs from shaded; leaving it restores the
+     shaded frame exactly. `textured.3dm` decodes its texture only in rendered/full.
+   * Categories: hiding `meshes` removes pixels and showing them restores the frame; with
+     `meshes` not pickable a tap on a box picks nothing.
+   * Caliper: two taps give points, distance, deltas; a tap on a box corner snaps to
+     `vertex`; a third tap restarts; leaving the mode makes taps select again.
+   * Curve quality: `Rhino_Logo.3dm` has more `curvePoints` at `max` than `high` than
+     `standard`.
+   * `annotations.3dm` (optional, written by Rhino 8 with `fixtures/make_annotations.py`;
+     skipped when absent): 5 annotations, 2 hatches, and hiding either removes pixels.
 5. Hostile-WebView cases, each on its own page: `getContext` forced to fail, `viewer.js` aborted,
    `three.module.js` aborted (the import-map target), a forced context loss and restore
    (`WEBGL_lose_context`), a zero `window.innerWidth`, the `viewer.diagnostics()` shape, the
@@ -448,9 +504,14 @@ Kotlin rejects anything whose bytes do not start with the `.3dm` magic (toast + 
   the report matters most when there is no model and nothing else to look at: it shows
   `viewer.diagnostics()` next to the asset and model URLs, recorded vs on-disk file size, the
   stage timeline with timings, engine versions and the recent event log, with one-tap Copy).
-  Bottom toolbar: Fit · Views (popup) ·
-  Display mode (popup) · Layers (bottom sheet: checkbox + color swatch + count; all/none) ·
-  Grid toggle · Ortho toggle. Loading overlay with phase + progress bar. Banner when
+  Bottom toolbar: Fit · Views (popup; also the Orthographic and Grid switches) ·
+  Display mode (popup, including Rendered; also the "Textures & shadows" switch, which
+  turns Rendered on) · Layers (bottom sheet: checkbox + color swatch + count; all/none) ·
+  Objects (bottom sheet: per category present in the file, a Show and a Select checkbox)
+  · Caliper (toggle; while on, a panel above the toolbar replaces the picked-object card
+  and shows the next step, P1/P2 with their snaps, the distance and unsigned ΔX/ΔY/ΔZ, with
+  Clear and Close). The page re-applies render quality, display mode, category switches
+  and caliper mode after every load, and sends the curve accuracy setting before it. Loading overlay with phase + progress bar. Banner when
   `unmeshed.total > 0`: "N objects have no render mesh" + `Mesh on server` (if backend URL
   configured; runs `/mesh`, saves `.meshed.3dm`, reloads) or `Set up server` (→ settings) and a
   hint "or re-save in Rhino with Save small unchecked". The loading overlay names the stage
@@ -461,8 +522,8 @@ Kotlin rejects anything whose bytes do not start with the `.3dm` magic (toast + 
   and still reports unmeshed objects, the banner says the server could not mesh them and offers
   no retry. Picked-object card (name, block name for instances, type, layer, size in model units
   with a unit symbol, user strings; scrolls when long) anchored bottom-left above the toolbar.
-* **Settings**: backend URL, API key (obscured), mesh quality (`draft/default/fine`), cache size
-  cap, "Clear cache", "Test connection" (`GET /health`; green when Compute is reachable, amber
+* **Settings**: backend URL, API key (obscured), mesh quality (`draft/default/fine`), curve
+  accuracy (`standard/high/max`, next file opened), cache size cap, "Clear cache", "Test connection" (`GET /health`; green when Compute is reachable, amber
   when the appserver answers but Compute is not configured or unreachable — `/mesh` fails in
   that state — red with the error code otherwise), *Hybrid rendering* (the composition mode of
   §3.1; on by default, and the only reason to turn it off is a viewer that never appears), about
@@ -658,7 +719,9 @@ Job `apk` (ubuntu-latest): checkout → `actions/setup-java@v4` temurin 21 → `
 decode `KEYSTORE_BASE64` → `app/android/app/upload-keystore.jks`, write `app/android/key.properties`
 from `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD` (each rejected unless printable ASCII and
 backslash-escaped, because `java.util.Properties` reads the file as ISO-8859-1 with `\` as the
-escape character) → `flutter build apk --release --split-per-abi` and `flutter build apk --release`
+escape character) → `flutter build apk --release --split-per-abi` and `flutter build apk --release` on tags;
+every other run builds only `--split-per-abi --target-platform android-arm64` (job env
+`ALL_ABIS`), which is what phones install and roughly a third less build time
 → upload artifacts `rhino-viewer-apk-<short sha>` (retention 30 days, `overwrite: true` so a
 re-run replaces the earlier attempt's artifact). Unsigned builds are still produced (debug-signed)
 with an explicit warning annotation.

@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhino_viewer/core/models/model_stats.dart';
+import 'package:rhino_viewer/core/models/viewer_options.dart';
 
 import 'support/fixtures.dart';
 
@@ -19,6 +20,16 @@ void main() {
       expect(stats.blocks, 0);
       expect(stats.lights, 2);
       expect(stats.other, 4);
+      expect(stats.annotations, 5);
+      expect(stats.hatches, 1);
+      expect(stats.categories[ObjectCategory.surfaces], 10);
+      expect(stats.categories[ObjectCategory.annotations], 9);
+      expect(stats.categories[ObjectCategory.blocks], 0);
+      expect(
+        stats.categories,
+        hasLength(ObjectCategory.values.length),
+        reason: 'unknown category names are dropped',
+      );
       expect(stats.units, 'Millimeters');
       expect(stats.layers, hasLength(2));
       expect(stats.layers[1].name, 'HIDDEN');
@@ -63,6 +74,8 @@ void main() {
       expect(stats.bbox.size, [0, 0, 0]);
       expect(stats.warnings, isEmpty);
       expect(stats.hasUnmeshed, isTrue);
+      expect(stats.annotations, 0);
+      expect(stats.categories, isEmpty);
     });
   });
 
@@ -152,6 +165,27 @@ void main() {
       // An unnamed instance is titled by its block rather than by its type.
       expect(instance.displayName, 'unit_box');
       expect(PickedObject.fromJson({'objectType': 'Mesh'}).blockName, '');
+    });
+
+    test('annotations carry their kind and text', () {
+      final dimension = PickedObject.fromJson({
+        'objectType': 'Annotation',
+        'subtype': 'Linear dimension',
+        'text': '328.4',
+      });
+      expect(dimension.subtype, 'Linear dimension');
+      expect(dimension.text, '328.4');
+      expect(dimension.typeLabel, 'Linear dimension');
+      expect(dimension.displayName, 'Linear dimension');
+    });
+
+    test('type labels are readable', () {
+      String label(String type) =>
+          PickedObject.fromJson({'objectType': type}).typeLabel;
+      expect(label('Brep'), 'Polysurface');
+      expect(label('InstanceReference'), 'Block instance');
+      expect(label('Mesh'), 'Mesh');
+      expect(PickedObject.fromJson({'objectType': 'Brep'}).text, '');
     });
   });
 }

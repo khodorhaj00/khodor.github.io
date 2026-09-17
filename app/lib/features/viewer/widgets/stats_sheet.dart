@@ -59,6 +59,8 @@ class StatsSheet extends StatelessWidget {
           _Line('Points', formatCount(stats.points)),
           _Line('Point clouds', formatCount(stats.pointClouds)),
           _Line('Blocks', formatCount(stats.blocks)),
+          _Line('Annotations', formatCount(stats.annotations)),
+          _Line('Hatches', formatCount(stats.hatches)),
           _Line('Lights', formatCount(stats.lights)),
           _Line('Other', formatCount(stats.other)),
           _Line('Layers', formatCount(stats.layers.length)),

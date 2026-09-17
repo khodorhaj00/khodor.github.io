@@ -11,7 +11,9 @@ import 'package:rhino_viewer/features/viewer/widgets/diagnostics_sheet.dart';
 import 'package:rhino_viewer/features/viewer/widgets/error_panel.dart';
 import 'package:rhino_viewer/features/viewer/widgets/layers_sheet.dart';
 import 'package:rhino_viewer/features/viewer/widgets/loading_overlay.dart';
+import 'package:rhino_viewer/features/viewer/widgets/measure_panel.dart';
 import 'package:rhino_viewer/features/viewer/widgets/meshing_banner.dart';
+import 'package:rhino_viewer/features/viewer/widgets/objects_sheet.dart';
 import 'package:rhino_viewer/features/viewer/widgets/picked_card.dart';
 import 'package:rhino_viewer/features/viewer/widgets/stats_sheet.dart';
 import 'package:rhino_viewer/features/viewer/widgets/toolbar.dart';
@@ -33,8 +35,11 @@ void main() {
       ViewerView? view;
       DisplayMode? mode;
       var layers = 0;
+      var objects = 0;
+      var measure = 0;
       bool? grid;
       Projection? projection;
+      RenderQuality? quality;
       await tester.pumpWidget(
         host(
           Align(
@@ -46,7 +51,10 @@ void main() {
               onFit: () => fit++,
               onView: (v) => view = v,
               onDisplayMode: (m) => mode = m,
+              onRenderQuality: (q) => quality = q,
               onLayers: () => layers++,
+              onObjects: () => objects++,
+              onMeasure: () => measure++,
               onGrid: (g) => grid = g,
               onProjection: (p) => projection = p,
             ),
@@ -55,12 +63,12 @@ void main() {
       );
       await tester.tap(find.text('Fit'));
       await tester.tap(find.text('Layers'));
-      await tester.tap(find.text('Grid'));
-      await tester.tap(find.text('Ortho'));
+      await tester.tap(find.text('Objects'));
+      await tester.tap(find.text('Caliper'));
       expect(fit, 1);
       expect(layers, 1);
-      expect(grid, isFalse, reason: 'toggles from the current value');
-      expect(projection, Projection.ortho);
+      expect(objects, 1);
+      expect(measure, 1);
 
       await tester.tap(find.text('Views'));
       await tester.pumpAndSettle();
@@ -68,11 +76,31 @@ void main() {
       await tester.pumpAndSettle();
       expect(view, ViewerView.top);
 
+      await tester.tap(find.text('Views'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Grid'));
+      await tester.pumpAndSettle();
+      expect(grid, isFalse, reason: 'toggles from the current value');
+
+      await tester.tap(find.text('Views'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Orthographic'));
+      await tester.pumpAndSettle();
+      expect(projection, Projection.ortho);
+
       await tester.tap(find.text('Display'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Wireframe'));
       await tester.pumpAndSettle();
       expect(mode, DisplayMode.wireframe);
+
+      // Textures & shadows also switches to the rendered mode.
+      await tester.tap(find.text('Display'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Textures & shadows'));
+      await tester.pumpAndSettle();
+      expect(quality, RenderQuality.full);
+      expect(mode, DisplayMode.rendered);
     });
 
     testWidgets('active toggles render in the accent colour', (tester) async {
@@ -82,10 +110,13 @@ void main() {
             displayMode: DisplayMode.shaded,
             projection: Projection.ortho,
             grid: false,
+            measuring: true,
             onFit: () {},
             onView: (_) {},
             onDisplayMode: (_) {},
             onLayers: () {},
+            onObjects: () {},
+            onMeasure: () {},
             onGrid: (_) {},
             onProjection: (_) {},
           ),
@@ -93,8 +124,56 @@ void main() {
       );
       Color colorOf(String label) =>
           tester.widget<Text>(find.text(label)).style!.color!;
-      expect(colorOf('Ortho'), AppColors.accent);
-      expect(colorOf('Grid'), AppColors.text);
+      expect(colorOf('Views'), AppColors.accent, reason: 'orthographic');
+      expect(colorOf('Caliper'), AppColors.accent);
+      expect(colorOf('Objects'), AppColors.text);
+
+      await tester.tap(find.text('Views'));
+      await tester.pumpAndSettle();
+      final checked = {
+        for (final item in tester.widgetList<CheckedPopupMenuItem<Object>>(
+          find.byWidgetPredicate((w) => w is CheckedPopupMenuItem),
+        ))
+          (item.child! as Text).data: item.checked,
+      };
+      expect(checked, {'Orthographic': true, 'Grid': false});
+    });
+
+    testWidgets('fits six buttons on a 360 dp phone', (tester) async {
+      tester.view.physicalSize = const Size(360, 640);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        host(
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: ViewerToolbar(
+              displayMode: DisplayMode.shaded,
+              projection: Projection.perspective,
+              grid: true,
+              onFit: () {},
+              onView: (_) {},
+              onDisplayMode: (_) {},
+              onLayers: () {},
+              onObjects: () {},
+              onMeasure: () {},
+              onGrid: (_) {},
+              onProjection: (_) {},
+            ),
+          ),
+        ),
+      );
+      for (final label in const [
+        'Fit',
+        'Views',
+        'Display',
+        'Layers',
+        'Objects',
+        'Caliper',
+      ]) {
+        expect(find.text(label), findsOneWidget);
+      }
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('Layers gets the layers glyph, Display a shading glyph', (
@@ -387,6 +466,122 @@ void main() {
     'center': [0, 0, 0],
   });
 
+  group('ObjectsSheet', () {
+    testWidgets('lists the categories in the file and reports switches', (
+      tester,
+    ) async {
+      final shown = <(ObjectCategory, bool)>[];
+      final picks = <(ObjectCategory, bool)>[];
+      await tester.pumpWidget(
+        host(
+          ObjectsSheet(
+            counts: stats.categories,
+            visible: {
+              for (final c in ObjectCategory.values)
+                c: c != ObjectCategory.hatches,
+            },
+            pickable: {for (final c in ObjectCategory.values) c: true},
+            onVisibleChanged: (c, v) => shown.add((c, v)),
+            onPickableChanged: (c, v) => picks.add((c, v)),
+          ),
+        ),
+      );
+      expect(find.text('Annotations'), findsOneWidget);
+      expect(find.text('Surfaces & solids'), findsOneWidget);
+      expect(find.text('Blocks'), findsNothing, reason: 'none in the file');
+      expect(find.text('218'), findsOneWidget);
+      // Rows: surfaces, meshes, curves, points, annotations, hatches; each
+      // with a Show and a Select box.
+      Checkbox box(int i) =>
+          tester.widget<Checkbox>(find.byType(Checkbox).at(i));
+      expect(find.byType(Checkbox), findsNWidgets(12));
+      expect(box(10).value, isFalse, reason: 'hatches start hidden here');
+
+      await tester.tap(find.byType(Checkbox).at(8));
+      await tester.pump();
+      await tester.tap(find.byType(Checkbox).at(1));
+      await tester.pump();
+      expect(shown, [(ObjectCategory.annotations, false)]);
+      expect(picks, [(ObjectCategory.surfaces, false)]);
+      expect(box(8).value, isFalse);
+      expect(box(1).value, isFalse);
+    });
+
+    testWidgets('lists every category when the page sent no counts', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        host(
+          ObjectsSheet(
+            counts: const {},
+            visible: const {},
+            pickable: const {},
+            onVisibleChanged: (_, _) {},
+            onPickableChanged: (_, _) {},
+          ),
+        ),
+      );
+      expect(
+        find.byType(Checkbox),
+        findsNWidgets(ObjectCategory.values.length * 2),
+      );
+    });
+  });
+
+  group('MeasurePanel', () {
+    testWidgets('guides the taps, then shows distance and deltas', (
+      tester,
+    ) async {
+      var cleared = 0;
+      var closed = 0;
+      Future<void> pump(MeasureResult result) => tester.pumpWidget(
+        host(
+          MeasurePanel(
+            result: result,
+            units: 'Millimeters',
+            onClear: () => cleared++,
+            onClose: () => closed++,
+          ),
+        ),
+      );
+      await pump(MeasureResult.empty);
+      expect(find.text('Tap the first point'), findsOneWidget);
+      expect(find.text('Clear'), findsNothing);
+
+      await pump(
+        const MeasureResult(
+          points: [
+            [0, 0, 0],
+          ],
+          snaps: [MeasureSnap.vertex],
+        ),
+      );
+      expect(find.text('Tap the second point'), findsOneWidget);
+      expect(find.textContaining('P1  0, 0, 0'), findsOneWidget);
+      expect(find.textContaining('Vertex'), findsOneWidget);
+
+      await pump(
+        const MeasureResult(
+          points: [
+            [0, 0, 0],
+            [-30, 40, 0],
+          ],
+          snaps: [MeasureSnap.vertex, MeasureSnap.surface],
+          distance: 50,
+          delta: [-30, 40, 0],
+        ),
+      );
+      expect(find.text('50 mm'), findsOneWidget);
+      expect(find.text('30'), findsOneWidget, reason: 'deltas are unsigned');
+      expect(find.text('40'), findsOneWidget);
+      expect(find.text('ΔZ'), findsOneWidget);
+      await tester.tap(find.text('Clear'));
+      await tester.tap(find.byTooltip('Close caliper'));
+      expect(cleared, 1);
+      expect(closed, 1);
+    });
+  });
+
   group('PickedCard', () {
     testWidgets('shows type, layer, size with a unit symbol and user strings', (
       tester,
@@ -402,7 +597,7 @@ void main() {
         ),
       );
       expect(find.text('Bracket'), findsOneWidget);
-      expect(find.text('Brep'), findsOneWidget);
+      expect(find.text('Polysurface'), findsOneWidget);
       expect(find.text('Block'), findsNothing);
       expect(find.text('PARTS'), findsOneWidget);
       expect(find.text('10 × 20.5 × 30 mm'), findsOneWidget);
@@ -434,6 +629,28 @@ void main() {
       );
       expect(find.text('Block'), findsOneWidget);
       expect(find.text('unit_box'), findsOneWidget);
+    });
+
+    testWidgets("shows an annotation's kind and text", (tester) async {
+      await tester.pumpWidget(
+        host(
+          PickedCard(
+            object: PickedObject.fromJson({
+              'objectType': 'Annotation',
+              'subtype': 'Linear dimension',
+              'text': '328.4',
+              'layerName': 'DIMS',
+              'size': [100, 0, 0],
+            }),
+            units: 'Millimeters',
+            onClose: () {},
+          ),
+        ),
+      );
+      // Title (no name) and Type row.
+      expect(find.text('Linear dimension'), findsNWidgets(2));
+      expect(find.text('Text'), findsOneWidget);
+      expect(find.text('328.4'), findsOneWidget);
     });
 
     testWidgets('keeps the close button on screen and scrolls many strings', (

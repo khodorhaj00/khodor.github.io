@@ -27,7 +27,19 @@ const Map<String, dynamic> sampleStatsJson = {
   'pointClouds': 1,
   'blocks': 0,
   'lights': 2,
+  'annotations': 5,
+  'hatches': 1,
   'other': 4,
+  'categories': {
+    'surfaces': 10,
+    'meshes': 2,
+    'curves': 218,
+    'points': 2,
+    'annotations': 9,
+    'hatches': 1,
+    'blocks': 0,
+    'unknownKind': 7,
+  },
   'layers': [
     {
       'index': 0,

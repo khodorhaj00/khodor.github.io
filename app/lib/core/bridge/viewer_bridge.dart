@@ -3,6 +3,9 @@ import 'dart:convert';
 
 import '../models/model_stats.dart';
 import '../models/viewer_events.dart';
+import '../models/viewer_options.dart';
+
+export '../models/viewer_options.dart';
 
 typedef JsHandler = dynamic Function(List<dynamic> arguments);
 
@@ -22,7 +25,8 @@ enum DisplayMode {
   shaded('shaded', 'Shaded'),
   shadedEdges('shaded_edges', 'Shaded + edges'),
   wireframe('wireframe', 'Wireframe'),
-  ghosted('ghosted', 'Ghosted');
+  ghosted('ghosted', 'Ghosted'),
+  rendered('rendered', 'Rendered');
 
   const DisplayMode(this.wireName, this.label);
 
@@ -43,6 +47,7 @@ class ViewerBridge {
   final _exportResult = StreamController<ExportResult>.broadcast();
   final _picked = StreamController<PickedObject?>.broadcast();
   final _log = StreamController<ViewerLog>.broadcast();
+  final _measure = StreamController<MeasureResult>.broadcast();
 
   Stream<ViewerReadyInfo> get onReady => _ready.stream;
 
@@ -56,6 +61,9 @@ class ViewerBridge {
   Stream<PickedObject?> get onObjectPicked => _picked.stream;
 
   Stream<ViewerLog> get onLog => _log.stream;
+
+  /// The caliper's points and result, after every tap in measure mode.
+  Stream<MeasureResult> get onMeasure => _measure.stream;
 
   /// Must be called before the page loads (i.e. in `onWebViewCreated`).
   void registerHandlers() {
@@ -82,6 +90,9 @@ class ViewerBridge {
     });
     _runner.addJavaScriptHandler('log', (args) {
       _emit(_log, ViewerLog.fromJson(_payload(args)));
+    });
+    _runner.addJavaScriptHandler('measure', (args) {
+      _emit(_measure, MeasureResult.fromJson(_payload(args)));
     });
   }
 
@@ -120,6 +131,24 @@ class ViewerBridge {
 
   Future<void> setPointsVisible(bool visible) =>
       _call('setPointsVisible', [visible]);
+
+  Future<void> setCategoryVisible(ObjectCategory category, bool visible) =>
+      _call('setCategoryVisible', [category.wireName, visible]);
+
+  Future<void> setCategoryPickable(ObjectCategory category, bool pickable) =>
+      _call('setCategoryPickable', [category.wireName, pickable]);
+
+  /// Takes effect with the next [load]: curves are sampled while parsing.
+  Future<void> setCurveQuality(CurveQuality quality) =>
+      _call('setCurveQuality', [quality.wireName]);
+
+  Future<void> setRenderQuality(RenderQuality quality) =>
+      _call('setRenderQuality', [quality.wireName]);
+
+  /// In measure mode a tap places a caliper point instead of selecting.
+  Future<void> setMeasureMode(bool active) => _call('setMeasureMode', [active]);
+
+  Future<void> clearMeasure() => _call('clearMeasure');
 
   Future<void> setGrid(bool visible) => _call('setGrid', [visible]);
 
@@ -181,5 +210,6 @@ class ViewerBridge {
     _exportResult.close();
     _picked.close();
     _log.close();
+    _measure.close();
   }
 }

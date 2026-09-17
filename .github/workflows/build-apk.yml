@@ -37,6 +37,9 @@ jobs:
       # The secrets context cannot be used in a step-level `if`, so the presence of the
       # keystore is resolved here into a plain job env var and steps test that instead.
       HAS_KEYSTORE: ${{ secrets.KEYSTORE_BASE64 != '' }}
+      # Test builds (PRs, pushes, manual runs) make only the arm64-v8a APK, the one every
+      # current phone installs; a release tag builds every ABI and the universal APK.
+      ALL_ABIS: ${{ startsWith(github.ref, 'refs/tags/v') }}
     outputs:
       version: ${{ steps.meta.outputs.version }}
       short_sha: ${{ steps.meta.outputs.short_sha }}
@@ -127,9 +130,15 @@ jobs:
           echo "::warning title=Unsigned build::KEYSTORE_BASE64 is not set - the APKs are signed with the debug key and cannot update a release-signed install. See README.md, 'Signing keystore for CI'."
 
       - name: Build split-per-ABI APKs
-        run: flutter build apk --release --split-per-abi
+        run: |
+          if [ "$ALL_ABIS" = 'true' ]; then
+            flutter build apk --release --split-per-abi
+          else
+            flutter build apk --release --split-per-abi --target-platform android-arm64
+          fi
 
       - name: Build universal APK
+        if: env.ALL_ABIS == 'true'
         run: flutter build apk --release
 
       - name: Collect and rename APKs
@@ -139,10 +148,14 @@ jobs:
         run: |
           out=build/app/outputs/flutter-apk
           mkdir -p dist
-          for abi in armeabi-v7a arm64-v8a x86_64; do
+          abis='arm64-v8a'
+          [ "$ALL_ABIS" = 'true' ] && abis='armeabi-v7a arm64-v8a x86_64'
+          for abi in $abis; do
             cp "$out/app-$abi-release.apk" "dist/rhino-viewer-$VERSION-$SHORT_SHA-$abi.apk"
           done
-          cp "$out/app-release.apk" "dist/rhino-viewer-$VERSION-$SHORT_SHA-universal.apk"
+          if [ "$ALL_ABIS" = 'true' ]; then
+            cp "$out/app-release.apk" "dist/rhino-viewer-$VERSION-$SHORT_SHA-universal.apk"
+          fi
           (cd dist && sha256sum ./*.apk > SHA256SUMS.txt)
           ls -l dist
 
