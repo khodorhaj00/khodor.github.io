@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:rhino_viewer/app/app_services.dart';
 import 'package:rhino_viewer/app/theme.dart';
+import 'package:rhino_viewer/core/models/viewer_options.dart';
 import 'package:rhino_viewer/core/services/backend_client.dart';
 import 'package:rhino_viewer/core/services/cache_service.dart';
 import 'package:rhino_viewer/core/services/file_service.dart';
@@ -276,6 +277,59 @@ void main() {
     await tester.pumpAndSettle();
     expect(File('${services.modelsDir.path}/abc.3dm').existsSync(), isFalse);
     expect(store.data.containsKey(CacheService.recentsKey), isFalse);
+  });
+
+  testWidgets('quality, annotation style and unit are persisted', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1080, 3000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await pumpPage(tester);
+    final before = services.settings.value;
+    expect(before.quality, ViewQuality.normal);
+    expect(before.unit, DisplayUnit.cm);
+    expect(before.annotationSize, AnnotationSize.medium);
+    expect(before.dimensionColor, AnnotationColorChoice.file);
+
+    await tester.tap(find.text('Ultra'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Large'));
+    await tester.pumpAndSettle();
+    expect(services.settings.value.quality, ViewQuality.ultra);
+    expect(services.settings.value.annotationSize, AnnotationSize.large);
+
+    // The unit menu also reveals the factor field for "Custom".
+    await tester.tap(find.byType(DropdownMenu<DisplayUnit>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('inch (2 decimals)').last);
+    await tester.pumpAndSettle();
+    expect(services.settings.value.unit, DisplayUnit.inch);
+    expect(
+      find.widgetWithText(TextField, 'Multiply model units by'),
+      findsNothing,
+    );
+
+    await tester.tap(find.byType(DropdownMenu<DisplayUnit>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Custom × factor').last);
+    await tester.pumpAndSettle();
+    expect(services.settings.value.unit, DisplayUnit.custom);
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Multiply model units by'),
+      '0.1',
+    );
+    await tester.pumpAndSettle();
+    expect(services.settings.value.customUnitFactor, 0.1);
+
+    // Everything survives a reload from the store.
+    final reloaded = SettingsService(store);
+    await reloaded.load();
+    expect(reloaded.value.quality, ViewQuality.ultra);
+    expect(reloaded.value.unit, DisplayUnit.custom);
+    expect(reloaded.value.customUnitFactor, 0.1);
+    expect(reloaded.value.annotationSize, AnnotationSize.large);
+    expect(reloaded.value.annotationOptions, containsPair('unitFactor', 0.1));
   });
 
   testWidgets('the hybrid rendering switch is on by default and persists', (

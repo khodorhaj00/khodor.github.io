@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
-import '../../../app/format.dart';
 import '../../../app/theme.dart';
+import '../../../app/units.dart';
 import '../../../core/models/viewer_events.dart';
 
 /// The caliper's readout, anchored above the toolbar while measure mode is
@@ -11,15 +11,15 @@ class MeasurePanel extends StatelessWidget {
   const MeasurePanel({
     super.key,
     required this.result,
-    required this.units,
+    required this.lengths,
     required this.onClear,
     required this.onClose,
   });
 
   final MeasureResult result;
 
-  /// rhino3dm unit name as reported by the viewer (see [unitSymbol]).
-  final String units;
+  /// Formats lengths in the unit the user chose.
+  final LengthFormat lengths;
   final VoidCallback onClear;
   final VoidCallback onClose;
 
@@ -67,7 +67,7 @@ class MeasurePanel extends StatelessWidget {
             ),
             if (distance != null)
               Text(
-                withUnit(formatLength(distance), units),
+                lengths.format(distance),
                 style: monoNumbers.copyWith(
                   color: AppColors.text,
                   fontSize: 22,
@@ -87,7 +87,7 @@ class MeasurePanel extends StatelessWidget {
                     Expanded(
                       child: _Delta(
                         axis: axis,
-                        value: formatLength(delta[i].abs()),
+                        value: lengths.bare(delta[i].abs()),
                       ),
                     ),
                 ],
@@ -97,7 +97,7 @@ class MeasurePanel extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.only(top: kGap / 2),
                 child: Text(
-                  'P${i + 1}  ${point.map(formatLength).join(', ')}'
+                  'P${i + 1}  ${lengths.formatPoint(point)}'
                   '  · ${result.snaps[i].label}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,

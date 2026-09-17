@@ -25,6 +25,9 @@ class _SettingsPageState extends State<SettingsPage> {
   late final TextEditingController _apiKey = TextEditingController(
     text: _settings.apiKey,
   );
+  late final TextEditingController _factor = TextEditingController(
+    text: _settings.customUnitFactor.toString(),
+  );
   bool _showKey = false;
   bool _testing = false;
   String? _testResult;
@@ -43,6 +46,7 @@ class _SettingsPageState extends State<SettingsPage> {
   void dispose() {
     _url.dispose();
     _apiKey.dispose();
+    _factor.dispose();
     super.dispose();
   }
 
@@ -257,31 +261,135 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             ],
           ),
-          const _Section('Viewer'),
-          const _Label('Curve accuracy'),
-          SegmentedButton<CurveQuality>(
+          const _Section('Quality'),
+          SegmentedButton<ViewQuality>(
             segments: [
-              for (final quality in CurveQuality.values)
+              for (final quality in ViewQuality.values)
                 ButtonSegment(value: quality, label: Text(quality.label)),
             ],
-            selected: {settings.curveQuality},
+            selected: {settings.quality},
+            showSelectedIcon: false,
+            style: SegmentedButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: kGap / 2),
+            ),
+            onSelectionChanged: (sel) =>
+                _save((s) => s.copyWith(quality: sel.first)),
+          ),
+          const Padding(
+            padding: EdgeInsets.only(top: kGap / 2, bottom: kGap),
+            child: Text(
+              'Curves, SubD smoothness, annotation text and the screen itself. '
+              'Ultra is the sharpest and the slowest on large files. Surfaces '
+              'keep the mesh Rhino saved in the file.',
+              style: TextStyle(color: AppColors.muted, fontSize: 12),
+            ),
+          ),
+          const _Section('Units'),
+          DropdownMenu<DisplayUnit>(
+            initialSelection: settings.unit,
+            requestFocusOnTap: false,
+            expandedInsets: EdgeInsets.zero,
+            textStyle: const TextStyle(color: AppColors.text, fontSize: 14),
+            dropdownMenuEntries: [
+              for (final unit in DisplayUnit.values)
+                DropdownMenuEntry(value: unit, label: _unitLabel(unit)),
+            ],
+            onSelected: (unit) {
+              if (unit != null) _save((s) => s.copyWith(unit: unit));
+            },
+          ),
+          if (settings.unit == DisplayUnit.custom) ...[
+            const SizedBox(height: kGap),
+            TextField(
+              controller: _factor,
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              decoration: const InputDecoration(
+                labelText: 'Multiply model units by',
+                hintText: '0.1',
+              ),
+              onChanged: (v) {
+                final factor = double.tryParse(v.trim().replaceAll(',', '.'));
+                if (factor != null && factor != 0) {
+                  _save((s) => s.copyWith(customUnitFactor: factor));
+                }
+              },
+            ),
+          ],
+          const Padding(
+            padding: EdgeInsets.only(top: kGap / 2, bottom: kGap),
+            child: Text(
+              'Dimensions, the caliper and the tapped object. The model itself '
+              'is not resized.',
+              style: TextStyle(color: AppColors.muted, fontSize: 12),
+            ),
+          ),
+          const _Section('Annotations'),
+          const _Label('Size'),
+          SegmentedButton<AnnotationSize>(
+            segments: [
+              for (final size in AnnotationSize.values)
+                ButtonSegment(value: size, label: Text(size.label)),
+            ],
+            selected: {settings.annotationSize},
             showSelectedIcon: false,
             style: SegmentedButton.styleFrom(
               visualDensity: VisualDensity.compact,
               padding: const EdgeInsets.symmetric(horizontal: kGap),
             ),
             onSelectionChanged: (sel) =>
-                _save((s) => s.copyWith(curveQuality: sel.first)),
+                _save((s) => s.copyWith(annotationSize: sel.first)),
+          ),
+          const SizedBox(height: kGap * 1.5),
+          const _Label('Dimensions'),
+          Row(
+            children: [
+              Expanded(
+                child: _ColorMenu(
+                  value: settings.dimensionColor,
+                  onSelected: (c) =>
+                      _save((s) => s.copyWith(dimensionColor: c)),
+                ),
+              ),
+              const SizedBox(width: kGap),
+              Expanded(
+                child: _FontMenu(
+                  value: settings.dimensionFont,
+                  onSelected: (f) => _save((s) => s.copyWith(dimensionFont: f)),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: kGap * 1.5),
+          const _Label('Text and leaders'),
+          Row(
+            children: [
+              Expanded(
+                child: _ColorMenu(
+                  value: settings.textColor,
+                  onSelected: (c) => _save((s) => s.copyWith(textColor: c)),
+                ),
+              ),
+              const SizedBox(width: kGap),
+              Expanded(
+                child: _FontMenu(
+                  value: settings.textFont,
+                  onSelected: (f) => _save((s) => s.copyWith(textFont: f)),
+                ),
+              ),
+            ],
           ),
           const Padding(
             padding: EdgeInsets.only(top: kGap / 2, bottom: kGap),
             child: Text(
-              'How closely curves follow their true shape. Max is exact but '
-              'slower on files with thousands of curves. Takes effect the next '
-              'time a file is opened.',
+              'Sans, Serif and Mono are bundled with the app and match the '
+              'spacing of Arial, Times New Roman and Courier New.',
               style: TextStyle(color: AppColors.muted, fontSize: 12),
             ),
           ),
+          const _Section('Viewer'),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             value: settings.hybridWebViewComposition,
@@ -312,6 +420,72 @@ class _SettingsPageState extends State<SettingsPage> {
       ),
     );
   }
+}
+
+/// `mm` … `Custom ×`, as shown in the unit menu.
+String _unitLabel(DisplayUnit unit) => switch (unit) {
+  DisplayUnit.file => 'From file',
+  DisplayUnit.mm => 'mm (no decimals)',
+  DisplayUnit.cm => 'cm (1 decimal)',
+  DisplayUnit.m => 'm (2 decimals)',
+  DisplayUnit.inch => 'inch (2 decimals)',
+  DisplayUnit.custom => 'Custom × factor',
+};
+
+/// The five colours every dimension, or every text, can take.
+class _ColorMenu extends StatelessWidget {
+  const _ColorMenu({required this.value, required this.onSelected});
+
+  final AnnotationColorChoice value;
+  final ValueChanged<AnnotationColorChoice> onSelected;
+
+  @override
+  Widget build(BuildContext context) => DropdownMenu<AnnotationColorChoice>(
+    initialSelection: value,
+    requestFocusOnTap: false,
+    expandedInsets: EdgeInsets.zero,
+    label: const Text('Colour'),
+    textStyle: const TextStyle(color: AppColors.text, fontSize: 14),
+    dropdownMenuEntries: [
+      for (final choice in AnnotationColorChoice.values)
+        DropdownMenuEntry(
+          value: choice,
+          label: choice.label,
+          leadingIcon: Icon(
+            choice.argb == null ? Icons.palette_outlined : Icons.square,
+            size: 16,
+            color: choice.argb == null ? AppColors.muted : Color(choice.argb!),
+          ),
+        ),
+    ],
+    onSelected: (choice) {
+      if (choice != null) onSelected(choice);
+    },
+  );
+}
+
+/// The five fonts every dimension, or every text, can take.
+class _FontMenu extends StatelessWidget {
+  const _FontMenu({required this.value, required this.onSelected});
+
+  final AnnotationFontChoice value;
+  final ValueChanged<AnnotationFontChoice> onSelected;
+
+  @override
+  Widget build(BuildContext context) => DropdownMenu<AnnotationFontChoice>(
+    initialSelection: value,
+    requestFocusOnTap: false,
+    expandedInsets: EdgeInsets.zero,
+    label: const Text('Font'),
+    textStyle: const TextStyle(color: AppColors.text, fontSize: 14),
+    dropdownMenuEntries: [
+      for (final choice in AnnotationFontChoice.values)
+        DropdownMenuEntry(value: choice, label: choice.label),
+    ],
+    onSelected: (choice) {
+      if (choice != null) onSelected(choice);
+    },
+  );
 }
 
 /// `256 MB` … `4 GB`, as shown in the size-cap menu.

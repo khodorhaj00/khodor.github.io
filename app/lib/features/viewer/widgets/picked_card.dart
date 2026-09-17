@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
-import '../../../app/format.dart';
 import '../../../app/theme.dart';
+import '../../../app/units.dart';
 import '../../../core/models/model_stats.dart';
 
 /// Details of the tapped object, anchored above the toolbar. The name row
@@ -11,7 +11,7 @@ class PickedCard extends StatelessWidget {
   const PickedCard({
     super.key,
     required this.object,
-    required this.units,
+    required this.lengths,
     required this.onClose,
   });
 
@@ -23,13 +23,13 @@ class PickedCard extends StatelessWidget {
 
   final PickedObject object;
 
-  /// rhino3dm unit name as reported by the viewer (see [unitSymbol]).
-  final String units;
+  /// Formats lengths in the unit the user chose.
+  final LengthFormat lengths;
   final VoidCallback onClose;
 
   @override
   Widget build(BuildContext context) {
-    final size = object.size.map(formatLength).join(' × ');
+    final size = lengths.formatTriple(object.size);
     return ConstrainedBox(
       constraints: BoxConstraints(
         maxHeight: MediaQuery.sizeOf(context).height * maxHeightFraction,
@@ -79,11 +79,7 @@ class PickedCard extends StatelessWidget {
                       if (object.blockName.isNotEmpty)
                         _Row(label: 'Block', value: object.blockName),
                       _Row(label: 'Layer', value: object.layerName),
-                      _Row(
-                        label: 'Size',
-                        value: withUnit(size, units),
-                        mono: true,
-                      ),
+                      _Row(label: 'Size', value: size, mono: true),
                       for (final entry in object.userStrings.entries)
                         _Row(label: entry.key, value: entry.value),
                     ],

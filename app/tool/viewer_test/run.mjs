@@ -769,20 +769,89 @@ async function testMeasure(page) {
   });
 }
 
-// Curve accuracy applies to the next load: the logo's 218 curves get more points at max
-// than at standard, and loading still works at every level.
-async function testCurveQuality(page) {
+// Quality applies to the next load: the logo's 218 curves get more points at every step up,
+// and loading still works at each level.
+async function testQuality(page) {
   const counts = {};
-  for (const quality of ['standard', 'high', 'max']) {
-    await page.evaluate((q) => window.viewer.setCurveQuality(q), quality);
+  for (const quality of ['draft', 'normal', 'fine', 'ultra']) {
+    await page.evaluate((q) => window.viewer.setQuality(q), quality);
     const result = await loadModel(page, { url: '/samples/Rhino_Logo.3dm', name: `Rhino_Logo (${quality}).3dm` });
     if (!result.ok) return;
-    checkEqual(result.stats.curves, 218, `curve quality ${quality}: curves`);
-    checkEqual(result.stats.curveQuality, quality, `curve quality ${quality}: reported`);
+    checkEqual(result.stats.curves, 218, `quality ${quality}: curves`);
+    checkEqual(result.stats.quality, quality, `quality ${quality}: reported`);
     counts[quality] = result.stats.curvePoints;
   }
-  check(counts.standard < counts.high && counts.high < counts.max, `curve quality: points standard ${counts.standard} < high ${counts.high} < max ${counts.max}`);
-  await page.evaluate(() => window.viewer.setCurveQuality('high'));
+  check(
+    counts.draft < counts.normal && counts.normal < counts.fine && counts.fine < counts.ultra,
+    `quality: curve points draft ${counts.draft} < normal ${counts.normal} < fine ${counts.fine} < ultra ${counts.ultra}`,
+  );
+  await page.evaluate(() => window.viewer.setQuality('normal'));
+}
+
+// Size, colour, font and unit rebuild the annotations in place (no reload) and change what
+// is drawn; the unit also changes the number a dimension reads.
+async function testAnnotationOptions(page) {
+  const result = await loadModel(page, { url: '/app/tool/viewer_test/fixtures/annotations.3dm', name: 'annotations.3dm' });
+  if (!result.ok) return;
+  await page.evaluate(() => {
+    window.viewer.setGrid(false);
+    window.viewer.setView('top');
+  });
+  const base = await modelSignature(page);
+  const pickedText = async () => {
+    const from = await eventCount(page);
+    await page.evaluate(() => window.viewer.setAnnotationOptions({}));
+    return (await eventsSince(page, from)).length;
+  };
+  checkEqual(await pickedText(), 0, 'annotation options: an empty change rebuilds nothing');
+
+  // 200 mm at the fixture's scale: 20 cm, 0.20 m, 7.87 in.
+  const unitLabels = {};
+  for (const unit of ['mm', 'cm', 'm', 'inch']) {
+    await page.evaluate((u) => window.viewer.setAnnotationOptions({ unit: u }), unit);
+    unitLabels[unit] = await page.evaluate(() => {
+      const found = [];
+      // The label text is kept on the annotation group for the app's picked-object card.
+      const walk = (o) => {
+        if (o.userData && o.userData.objectType === 'Annotation' && o.userData.text) found.push(o.userData.text);
+        (o.children || []).forEach(walk);
+      };
+      walk(window.__viewerModelRoot || {});
+      return found;
+    });
+  }
+  check(unitLabels.mm.includes('200 mm'), `unit mm: ${JSON.stringify(unitLabels.mm)}`);
+  check(unitLabels.cm.includes('20.0 cm'), `unit cm: ${JSON.stringify(unitLabels.cm)}`);
+  check(unitLabels.m.includes('0.20 m'), `unit m: ${JSON.stringify(unitLabels.m)}`);
+  check(unitLabels.inch.includes('7.87 "'), `unit inch: ${JSON.stringify(unitLabels.inch)}`);
+
+  await page.evaluate(() => window.viewer.setAnnotationOptions({ unit: 'custom', unitFactor: 0.1 }));
+  const custom = await page.evaluate(() => {
+    const found = [];
+    const walk = (o) => {
+      if (o.userData && o.userData.objectType === 'Annotation' && o.userData.text) found.push(o.userData.text);
+      (o.children || []).forEach(walk);
+    };
+    walk(window.__viewerModelRoot || {});
+    return found;
+  });
+  check(custom.includes('20.00'), `custom unit x0.1: ${JSON.stringify(custom)}`);
+
+  await page.evaluate(() => window.viewer.setAnnotationOptions({ unit: 'cm' }));
+  const cmFrame = await modelSignature(page);
+  await page.evaluate(() => window.viewer.setAnnotationOptions({ size: 'large' }));
+  const large = await modelSignature(page);
+  check(large.hash !== cmFrame.hash && large.drawn > cmFrame.drawn, `annotation size large: ${cmFrame.drawn} → ${large.drawn} pixels`);
+  await page.evaluate(() => window.viewer.setAnnotationOptions({ size: 'medium', dimColor: 'amber', textFont: 'serif' }));
+  const styled = await modelSignature(page);
+  check(styled.hash !== cmFrame.hash, 'annotation colour and font change the frame');
+  await page.evaluate(() => window.viewer.setAnnotationOptions({ dimColor: 'file', textFont: 'file' }));
+  checkEqual((await modelSignature(page)).hash, cmFrame.hash, 'annotation options back to the file: frame restored');
+  checkEqual((await modelSignature(page)).drawn, base.drawn, 'annotation options: no drift after rebuilds');
+  await page.evaluate(() => {
+    window.viewer.setGrid(true);
+    window.viewer.setView('iso');
+  });
 }
 
 async function testViewsAndProjection(page) {
@@ -1374,8 +1443,10 @@ async function main() {
       await testMeasure(page);
       console.log('\n== picking (blocks.3dm, nested_blocks.3dm)');
       await testPickingBlocks(page);
-      console.log('\n== curve accuracy (Rhino_Logo.3dm)');
-      await testCurveQuality(page);
+      console.log('\n== quality (Rhino_Logo.3dm)');
+      await testQuality(page);
+      console.log('\n== annotation options (annotations.3dm)');
+      await testAnnotationOptions(page);
       console.log('\n== base64 / errors / clear');
       await testBase64Load(page);
       await testBadLoad(page);

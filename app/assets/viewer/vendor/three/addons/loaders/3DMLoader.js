@@ -84,8 +84,10 @@ class Rhino3dmLoader extends Loader {
 		// values increase smoothness at the cost of (potentially very large) vertex counts.
 		this.subdivisionLevel = 3;
 
-		// PATCH(curve-accuracy): 'standard' | 'high' | 'max', sent with every decode.
-		this.curveQuality = 'high';
+		// PATCH(curve-accuracy): { relTol, arcStepDeg, maxPoints } — a chord tolerance
+		// relative to each curve's own size, an arc step and a per-curve cap. The app's
+		// quality levels live in app/assets/viewer/config.js.
+		this.curveOptions = null;
 
 		this.materials = [];
 		this.warnings = [];
@@ -215,8 +217,8 @@ class Rhino3dmLoader extends Loader {
 
 					worker._callbacks[ taskID ] = { resolve, reject };
 
-					// PATCH(curve-accuracy): the worker samples curves to this quality ('standard' | 'high' | 'max').
-					worker.postMessage( { type: 'decode', id: taskID, buffer, subdivisionLevel: this.subdivisionLevel, curveQuality: this.curveQuality }, [ buffer ] );
+					// PATCH(curve-accuracy): how finely the worker samples curves.
+					worker.postMessage( { type: 'decode', id: taskID, buffer, subdivisionLevel: this.subdivisionLevel, curveOptions: this.curveOptions }, [ buffer ] );
 
 				} );
 
@@ -1139,13 +1141,9 @@ function Rhino3dmWorker() {
 	let initError; // PATCH(init-error)
 
 	// PATCH(curve-accuracy): chord tolerance as a fraction of each curve's own size, arc step,
-	// and the per-curve point cap. See curveToPoints().
-	const CURVE_QUALITY = {
-		standard: { relTol: 1e-3, arcStepDeg: 5, maxPoints: 2000 },
-		high: { relTol: 2e-4, arcStepDeg: 2, maxPoints: 8000 },
-		max: { relTol: 5e-5, arcStepDeg: 1, maxPoints: 32000 }
-	};
-	let curveTolerances = CURVE_QUALITY.high;
+	// and the per-curve point cap, sent with every decode. See curveToPoints().
+	const CURVE_DEFAULTS = { relTol: 5e-4, arcStepDeg: 3, maxPoints: 4000 };
+	let curveTolerances = CURVE_DEFAULTS;
 
 	// PATCH(annotations): dimension styles by id, looked up once per decode.
 	let dimstyleCache = null;
@@ -1190,7 +1188,7 @@ function Rhino3dmWorker() {
 				taskID = message.id;
 				const buffer = message.buffer;
 				const subdivisionLevel = message.subdivisionLevel;
-				curveTolerances = CURVE_QUALITY[ message.curveQuality ] || CURVE_QUALITY.high; // PATCH(curve-accuracy)
+				curveTolerances = message.curveOptions || CURVE_DEFAULTS; // PATCH(curve-accuracy)
 				libraryPending.then( () => {
 
 					try {
@@ -2322,10 +2320,12 @@ function Rhino3dmWorker() {
 				label: null
 			};
 
-			// Text Rhino has not formatted yet (a file written before the annotation was
-			// ever drawn) is measured here; "<>" stands for the measurement.
+			// The measured value in model units, so the app can show the dimension in any
+			// unit, and Rhino's own formatting for text it has not formatted yet (a file
+			// written before the annotation was ever drawn); "<>" stands for the measurement.
 			const withMeasurement = ( value, prefix ) => {
 
+				out.measure = { value: value, prefix: prefix };
 				const measured = formatMeasurement( value, style, prefix );
 				if ( ! out.text ) out.text = measured;
 				else if ( out.text.indexOf( '<>' ) >= 0 ) out.text = out.text.split( '<>' ).join( measured );
@@ -2391,14 +2391,15 @@ function Rhino3dmWorker() {
 					const axis = vNormalize( vSub( a2, a1 ) );
 					if ( axis ) {
 
-						// The dimension line runs between the arrows and on to the text when the
-						// text sits outside them.
+						// The dimension line runs between the arrows, and on to the text when the
+						// text sits outside them. Not to `points.dimline`: that only fixes how far
+						// the line sits from the definition points and can be far outside them
+						// (KIOSK's 240.0 dimension has it 160 cm below the model).
 						let t0 = 0;
 						let t1 = vLength( vSub( a2, a1 ) );
-						for ( const p of [ dimline, textPoint ] ) {
+						if ( textPoint ) {
 
-							if ( ! p ) continue;
-							const t = vDot( vSub( p, a1 ), axis );
+							const t = vDot( vSub( textPoint, a1 ), axis );
 							t0 = Math.min( t0, t );
 							t1 = Math.max( t1, t );
 

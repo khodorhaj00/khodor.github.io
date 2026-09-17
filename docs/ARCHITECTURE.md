@@ -44,7 +44,12 @@ vendor/three/addons/environments/RoomEnvironment.js   (rendered display mode)
 vendor/rhino3dm/rhino3dm.js, rhino3dm.wasm             rhino3dm 8.35.0 (the backend keeps npm 8.32.2)
 ```
 
-Page files: `index.html`, `viewer.css`, `viewer.js`, `annotations.js`, `PATCHES.md`.
+Page files: `index.html`, `viewer.css`, `viewer.js`, `annotations.js`, `config.js`,
+`PATCHES.md`, and `fonts/` — the Liberation faces (SIL OFL, subset to 1.4 MB, see
+`fonts/VERSION`) that match Arial, Times New Roman and Courier New, which Android lacks.
+**`config.js` is the single list of options** — quality levels, annotation sizes, colours,
+fonts, units — and the Dart enums in `lib/core/models/viewer_options.dart` must use the same
+names (docs/CUSTOMISING.md).
 
 * `index.html` uses an import map:
   `{"imports":{"three":"./vendor/three/three.module.js","three/addons/":"./vendor/three/addons/"}}`
@@ -59,7 +64,10 @@ Page files: `index.html`, `viewer.css`, `viewer.js`, `annotations.js`, `PATCHES.
   tells "the module never ran" from "it ran and stopped" by the `DOMContentLoaded` ordering.
 * `Rhino3dmLoader.setLibraryPath('./vendor/rhino3dm/')`. The loader fetches `rhino3dm.js` +
   `rhino3dm.wasm` and runs decoding in a Blob Web Worker (needs an http(s) origin — provided by
-  the Android `WebViewAssetLoader`, see §3). `setWorkerLimit(1)` (phones), `setSubdivisionLevel(2)`.
+  the Android `WebViewAssetLoader`, see §3). `setWorkerLimit(1)` (phones); curve sampling,
+  `setSubdivisionLevel()`, the label texture size and the canvas pixel ratio all come from the
+  quality level (`config.js` → `QUALITY`, default `normal`). The first two apply to the next
+  `load()`, the last two at once.
 * **Patches to 3DMLoader.js** — five, all in `PATCHES.md`: `no-mesh`, `init-error`,
   `invalid-file`, `curve-accuracy` (curves sampled to a chord tolerance relative to their
   size, `loader.curveQuality` = `standard` / `high` / `max`, instead of 100 fixed points)
@@ -164,7 +172,8 @@ All methods are synchronous or return a Promise; all results are reported throug
 | `viewer.setCurvesVisible(bool)` / `viewer.setPointsVisible(bool)` | Default both true. Shorthands for the two categories below. |
 | `viewer.setCategoryVisible(category, bool)` | `surfaces` (Brep, Extrusion, SubD) `meshes` `curves` `points` (point, point cloud) `annotations` (dimensions, text, leaders, text dots) `hatches` `blocks` (whole instances). Every load starts with all visible. |
 | `viewer.setCategoryPickable(category, bool)` | Selection filter, same categories; anything inside a block instance follows `blocks`. Clears a pick that no longer qualifies. |
-| `viewer.setCurveQuality(q)` | `standard` `high` (default) `max`; applies to the next `load()` (curves are sampled while parsing). |
+| `viewer.setQuality(q)` | `draft` `normal` (default) `fine` `ultra`. Label and canvas resolution change at once; curve sampling and SubD subdivision with the next `load()`. Surfaces keep the render mesh the file carries. |
+| `viewer.setAnnotationOptions({ size, dimColor, dimFont, textColor, textFont, unit, unitFactor })` | Any subset; unknown names or values are warned about and ignored. Rebuilds every annotation in place from the worker's payload (no re-read), so it is instant. `unit` is `file` `mm` `cm` (default) `m` `inch` `custom` — `custom` multiplies the model's own units by `unitFactor`. |
 | `viewer.setDisplayMode('rendered')` / `viewer.setRenderQuality(q)` | `basic` (default): file materials, image-based light. `full`: also textures and shadows. |
 | `viewer.setRenderLighting(bool)` | Rendered mode lighting, default on; off draws the materials unlit. |
 | `viewer.setMeasureMode(bool)` / `viewer.clearMeasure()` | Caliper on/off (either clears it and emits `measure` with no points); clear keeps the mode. |
@@ -206,7 +215,7 @@ error }` and `exportGlb()` emits `exportResult { ok: false, error }` instead of 
   "annotations": 5, "hatches": 1, "other": 4,
   "categories": { "surfaces": 10, "meshes": 2, "curves": 218, "points": 2,
                   "annotations": 9, "hatches": 1, "blocks": 0 },
-  "curvePoints": 15621, "curveQuality": "high", "labels": 9,
+  "curvePoints": 15621, "quality": "normal", "labels": 9,
   "layers": [ { "index": 0, "name": "Default", "fullPath": "Default", "color": "#RRGGBB",
                 "visible": true, "objectCount": 12 } ],
   "unmeshed": { "breps": 0, "extrusions": 0, "total": 0 },
@@ -253,8 +262,10 @@ Node + Playwright, no Flutter needed. `package.json` (devDependency `playwright@
      `meshes` not pickable a tap on a box picks nothing.
    * Caliper: two taps give points, distance, deltas; a tap on a box corner snaps to
      `vertex`; a third tap restarts; leaving the mode makes taps select again.
-   * Curve quality: `Rhino_Logo.3dm` has more `curvePoints` at `max` than `high` than
-     `standard`.
+   * Quality: `Rhino_Logo.3dm` gains `curvePoints` at every step from `draft` to `ultra`.
+   * Annotation options on `annotations.3dm`: the 200 mm dimension reads `200 mm`, `20.0 cm`,
+     `0.20 m`, `7.87 "` and `20.00` (custom ×0.1); size, colour and font change the frame and
+     going back to the file's own restores it exactly.
    * `annotations.3dm` (optional, written by Rhino 8 with `fixtures/make_annotations.py`;
      skipped when absent): 5 annotations and 5 labels (two dimensions are measured by the
      viewer because the file stores no text for them), 2 hatches, and hiding either removes
@@ -522,7 +533,10 @@ Kotlin rejects anything whose bytes do not start with the `.3dm` magic (toast + 
   · Caliper (toggle; while on, a panel above the toolbar replaces the picked-object card
   and shows the next step, P1/P2 with their snaps, the distance and unsigned ΔX/ΔY/ΔZ, with
   Clear and Close). The page re-applies render quality, display mode, category switches
-  and caliper mode after every load, and sends the curve accuracy setting before it. Loading overlay with phase + progress bar. Banner when
+  and caliper mode after every load, and sends the quality before it. A settings change
+  while the viewer is open applies at once (annotation options) or re-reads the file
+  (quality); the caliper panel and the picked card format lengths through
+  `lib/app/units.dart`, which mirrors the viewer's unit conversion. Loading overlay with phase + progress bar. Banner when
   `unmeshed.total > 0`: "N objects have no render mesh" + `Mesh on server` (only when a backend
   URL is configured; runs `/mesh`, saves `.meshed.3dm`, reloads) and the hint "re-save in
   Rhino with Save small unchecked". Server meshing is optional and the only networked
@@ -534,8 +548,9 @@ Kotlin rejects anything whose bytes do not start with the `.3dm` magic (toast + 
   and still reports unmeshed objects, the banner says the server could not mesh them and offers
   no retry. Picked-object card (name, block name for instances, type, layer, size in model units
   with a unit symbol, user strings; scrolls when long) anchored bottom-left above the toolbar.
-* **Settings**: backend URL, API key (obscured), mesh quality (`draft/default/fine`), curve
-  accuracy (`standard/high/max`, next file opened), cache size cap, "Clear cache", "Test connection" (`GET /health`; green when Compute is reachable, amber
+* **Settings**: quality (`draft/normal/fine/ultra`), unit (`file/mm/cm/m/inch/custom ×`),
+  annotation size and the colour and font of dimensions and of text, backend URL, API key
+  (obscured), mesh quality (`draft/default/fine`), cache size cap, "Clear cache", "Test connection" (`GET /health`; green when Compute is reachable, amber
   when the appserver answers but Compute is not configured or unreachable — `/mesh` fails in
   that state — red with the error code otherwise), *Hybrid rendering* (the composition mode of
   §3.1; on by default, and the only reason to turn it off is a viewer that never appears), about

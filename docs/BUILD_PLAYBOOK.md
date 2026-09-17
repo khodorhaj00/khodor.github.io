@@ -35,6 +35,7 @@ Vendored into `app/assets/viewer/vendor/`, no CDN at runtime:
 
 - three.js r186 (0.186.0), MIT
 - rhino3dm 8.35.0, MIT (2.7 MB WebAssembly; 8.35 is the first with per-annotation text height, scale and font)
+- Liberation Sans / Serif / Mono 2.1.5, SIL OFL (1.4 MB subset; Android has no Arial or Times)
 
 ---
 

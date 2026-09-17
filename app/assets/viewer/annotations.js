@@ -1,27 +1,40 @@
 import * as THREE from 'three';
 
+import {
+  ANNOTATION_COLORS,
+  ANNOTATION_FONTS,
+  ANNOTATION_SIZES,
+  DEFAULT_FONT_STACK,
+  DEFAULT_QUALITY,
+  DIMENSION_KINDS,
+  FONT_ALIASES,
+  MIN_ARROW_PX,
+  MIN_TEXT_PX,
+  MM_PER_MODEL_UNIT,
+  QUALITY,
+  UNITS,
+} from './config.js';
+
 // ---------------------------------------------------------------------------------------
 // Annotations (dimensions, text, leaders) and hatches
 // ---------------------------------------------------------------------------------------
 //
 // The patched loader worker (PATCHES.md, `annotations`) hands over world-space lines,
-// arrowheads and one text placement per annotation, and the 2D boundary loops of each
-// hatch. This module turns them into three.js objects: a Group per Rhino object carrying
-// the object's attributes, with parts that viewer.js colours like any other object.
+// arrowheads, one text placement and the measured value per annotation, and the 2D boundary
+// loops of each hatch. This module turns them into three.js objects: a Group per Rhino
+// object carrying the object's attributes and the worker's payload, so a change of options
+// (size, colour, font, unit, quality) rebuilds it without re-reading the file.
 //
-// Sizes are the file's (text height and style lengths times the model-space scale, from
-// the worker). A label or an arrowhead is still never drawn smaller than a few pixels
-// (updateAnnotationScale()), and labels whose style says "draw forward" turn to read left
-// to right from the camera, as Rhino draws them.
+// Sizes, fonts and justification are the file's (PATCHES.md), each multiplied by the chosen
+// annotation size. A label or an arrowhead is never drawn smaller than a few pixels
+// (updateAnnotationScale()), and labels whose style says "draw forward" turn to read left to
+// right from the camera, as Rhino draws them.
 
-const FONT_PX = 40;
-const CAP_HEIGHT = 0.716; // Arial cap height as a fraction of the em
+const CAP_HEIGHT = 0.716; // Arial / Liberation Sans cap height as a fraction of the em
 const LINE_HEIGHT = 1.3; // em
 const PAD_PX = 8;
 const MAX_TEXTURE_PX = 2048;
 const MAX_LABELS = 3000;
-const MIN_TEXT_PX = 10;
-const MIN_ARROW_PX = 7;
 const HATCH_SOLID_OPACITY = 0.85;
 const HATCH_PATTERN_OPACITY = 0.35;
 
@@ -35,54 +48,117 @@ let labelCount = 0;
 
 export const ANNOTATION_TYPES = new Set(['Annotation', 'Hatch']);
 
+/** What annotations are built with; viewer.js owns the live copy (see config.js). */
+export const annotationOptions = {
+  quality: DEFAULT_QUALITY,
+  size: 'medium',
+  dimColor: 'file',
+  dimFont: 'file',
+  textColor: 'file',
+  textFont: 'file',
+  unit: 'cm',
+  unitFactor: 1,
+  modelUnits: 'Millimeters',
+};
+
 const v3 = (a) => new THREE.Vector3(a[0], a[1], a[2]);
 
-// ---------------------------------------------------------------------------------------
-// Text
-// ---------------------------------------------------------------------------------------
-
-// A CSS font list for a Rhino font name: the font itself when the phone has it, else the
-// closest generic family (Android ships sans-serif, serif and monospace faces).
-function fontStack(family) {
-  const name = (family || 'Arial').replace(/["\\]/g, '');
-  const mono = /courier|mono|consol/i.test(name);
-  const serif = !mono && !/sans/i.test(name) && /times|georgia|garamond|roman|serif|palatino|cambria|book/i.test(name);
-  return `"${name}", ${mono ? 'monospace' : serif ? 'serif' : 'Arial, Helvetica, sans-serif'}`;
+function fontPx() {
+  return (QUALITY[annotationOptions.quality] || QUALITY[DEFAULT_QUALITY]).fontPx;
 }
 
-function textTexture(style, text, align) {
-  const key = `${style.family}|${style.bold}|${style.italic}\n${align}\n${text}`;
+function sizeFactor() {
+  return ANNOTATION_SIZES[annotationOptions.size] ?? 1;
+}
+
+export function isDimension(kind) {
+  return DIMENSION_KINDS.has(kind);
+}
+
+/** The colour chosen for this kind of annotation, or null to keep the object's own. */
+export function colorChoiceFor(kind) {
+  const choice = isDimension(kind) ? annotationOptions.dimColor : annotationOptions.textColor;
+  return ANNOTATION_COLORS[choice] ?? null;
+}
+
+function fontStackFor(g) {
+  const choice = isDimension(g.kind) ? annotationOptions.dimFont : annotationOptions.textFont;
+  const chosen = ANNOTATION_FONTS[choice];
+  if (chosen) return chosen;
+  // 'file': the Rhino font first, then the bundled face with the same metrics.
+  const family = (g.font || '').replace(/["\\]/g, '');
+  const alias = FONT_ALIASES.find((entry) => entry.match.test(family));
+  const fallback = alias ? alias.stack : DEFAULT_FONT_STACK;
+  return family ? `"${family}", ${fallback}` : fallback;
+}
+
+// ---------------------------------------------------------------------------------------
+// Text: the number a dimension shows, and the texture it is drawn into
+// ---------------------------------------------------------------------------------------
+
+function formatLength(value, unit) {
+  const text = value.toFixed(unit.decimals);
+  return unit.label ? `${text} ${unit.label}` : text;
+}
+
+/** Millimetres per unit of the model, or null when the file does not say. */
+export function mmPerModelUnit() {
+  return MM_PER_MODEL_UNIT[annotationOptions.modelUnits] ?? null;
+}
+
+/**
+ * What a label reads: the file's own text in `file` units, otherwise the measurement the
+ * worker took, converted. An annotation with no measurement (angles, ordinates, text and
+ * leaders) keeps its text either way.
+ */
+export function labelText(g) {
+  const unit = UNITS[annotationOptions.unit];
+  if (!unit || !g.measure || annotationOptions.unit === 'file') return g.text || '';
+  const prefix = g.measure.prefix || '';
+  if (annotationOptions.unit === 'custom') {
+    return prefix + formatLength(g.measure.value * (annotationOptions.unitFactor || 1), unit);
+  }
+  const mm = mmPerModelUnit();
+  if (mm === null) return g.text || '';
+  return prefix + formatLength((g.measure.value * mm) / unit.mmPerUnit, unit);
+}
+
+// The bundled Liberation faces match Arial, Times and Courier metrics, so text keeps
+// Rhino's spacing whichever font the file asks for.
+function textTexture(stack, bold, italic, text, align) {
+  const px = fontPx();
+  const key = `${stack}|${bold}|${italic}|${px}\n${align}\n${text}`;
   let entry = textures.get(key);
   if (entry) return entry;
   const lines = text.split(/\r\n|\r|\n/);
   const ctx = document.createElement('canvas').getContext('2d');
-  let fontPx = FONT_PX;
-  const weight = `${style.italic ? 'italic ' : ''}${style.bold ? 'bold ' : ''}`;
-  const fontSpec = (px) => `${weight}${px}px ${fontStack(style.family)}`;
-  ctx.font = fontSpec(fontPx);
+  let usedPx = px;
+  const weight = `${italic ? 'italic ' : ''}${bold ? 'bold ' : ''}`;
+  const fontSpec = (size) => `${weight}${size}px ${stack}`;
+  ctx.font = fontSpec(usedPx);
   let textWidth = Math.max(1, ...lines.map((line) => ctx.measureText(line).width));
   // Very long text is drawn with a smaller font so the texture stays within limits.
   if (textWidth + PAD_PX * 2 > MAX_TEXTURE_PX) {
-    fontPx = Math.max(8, Math.floor(fontPx * (MAX_TEXTURE_PX - PAD_PX * 2) / textWidth));
-    ctx.font = fontSpec(fontPx);
+    usedPx = Math.max(8, Math.floor((usedPx * (MAX_TEXTURE_PX - PAD_PX * 2)) / textWidth));
+    ctx.font = fontSpec(usedPx);
     textWidth = Math.max(1, ...lines.map((line) => ctx.measureText(line).width));
   }
-  const lineHeight = fontPx * LINE_HEIGHT;
+  const lineHeight = usedPx * LINE_HEIGHT;
   const width = Math.ceil(textWidth) + PAD_PX * 2;
-  const height = Math.min(MAX_TEXTURE_PX, Math.ceil(PAD_PX * 2 + (lines.length - 1) * lineHeight + fontPx));
+  const height = Math.min(MAX_TEXTURE_PX, Math.ceil(PAD_PX * 2 + (lines.length - 1) * lineHeight + usedPx));
   ctx.canvas.width = width;
   ctx.canvas.height = height;
-  ctx.font = fontSpec(fontPx);
+  ctx.font = fontSpec(usedPx);
   ctx.fillStyle = '#ffffff';
   ctx.textBaseline = 'alphabetic';
   ctx.textAlign = align === 'center' ? 'center' : align === 'right' ? 'right' : 'left';
   const x = align === 'center' ? width / 2 : align === 'right' ? width - PAD_PX : PAD_PX;
-  lines.forEach((line, i) => ctx.fillText(line, x, PAD_PX + i * lineHeight + fontPx * CAP_HEIGHT));
+  lines.forEach((line, i) => ctx.fillText(line, x, PAD_PX + i * lineHeight + usedPx * CAP_HEIGHT));
 
   const texture = new THREE.CanvasTexture(ctx.canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.anisotropy = 4;
-  entry = { key, texture, width, height, fontPx, lineHeight, lines: lines.length };
+  entry = { key, texture, width, height, fontPx: usedPx, lineHeight, lines: lines.length };
   textures.set(key, entry);
   return entry;
 }
@@ -101,12 +177,16 @@ function templateMaterial(texture) {
 // read forward keeps it in place. `valign` says which part of the text sits on the anchor
 // ('above' = the last baseline one text gap above it, as Rhino draws dimension text).
 function buildLabel(g) {
-  if (labelCount >= MAX_LABELS) return null;
+  const text = labelText(g);
+  if (!text || labelCount >= MAX_LABELS) return null;
   const label = g.label;
-  const tex = textTexture({ family: g.font, bold: Boolean(g.bold), italic: Boolean(g.italic) }, g.text, label.align);
+  const scale = sizeFactor();
+  const tex = textTexture(fontStackFor(g), Boolean(g.bold), Boolean(g.italic), text, label.align);
   labelCount += 1;
+  const textHeight = g.textHeight * scale;
+  const gap = g.textGap * scale;
   // World size of one texture pixel, from the cap height.
-  const k = g.textHeight / (CAP_HEIGHT * tex.fontPx);
+  const k = textHeight / (CAP_HEIGHT * tex.fontPx);
   const w = tex.width * k;
   const h = tex.height * k;
   const capPx = tex.fontPx * CAP_HEIGHT;
@@ -127,11 +207,8 @@ function buildLabel(g) {
     bottom: PAD_PX + lastLinePx + capPx,
     bottomOfBox: PAD_PX + lastLinePx + capPx + tex.fontPx * 0.21,
   };
-  const top = label.valign in anchorPx
-    ? anchorPx[label.valign] * k
-    : anchorPx.bottom * k + g.textGap; // 'above'
-  let shift = 0;
-  if (label.gap) shift = label.align === 'right' ? -g.textGap : g.textGap;
+  const top = label.valign in anchorPx ? anchorPx[label.valign] * k : anchorPx.bottom * k + gap; // 'above'
+  const shift = label.gap ? (label.align === 'right' ? -gap : gap) : 0;
 
   const normal = v3(g.normal);
   const dir = v3(label.dir).normalize();
@@ -148,7 +225,7 @@ function buildLabel(g) {
   anchor.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(dir, up, new THREE.Vector3().crossVectors(dir, up)));
   anchor.position.copy(v3(label.point));
   anchor.userData.annotationPart = 'text';
-  anchor.userData.worldSize = g.textHeight;
+  anchor.userData.worldSize = textHeight;
   anchor.userData.minPx = MIN_TEXT_PX;
   anchor.userData.drawForward = g.drawForward !== false;
   anchor.add(quad);
@@ -169,11 +246,9 @@ function arrowGeometry(type) {
   let entry = arrowGeometries.get(type);
   if (entry) return entry;
   switch (type) {
-    case 'Dot': {
-      const geometry = new THREE.CircleGeometry(0.25, 16);
-      entry = { geometry, lines: false };
+    case 'Dot':
+      entry = { geometry: new THREE.CircleGeometry(0.25, 16), lines: false };
       break;
-    }
     case 'Tick': {
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute('position', new THREE.Float32BufferAttribute([-0.35, -0.35, 0, 0.35, 0.35, 0], 3));
@@ -217,12 +292,13 @@ function buildArrow(arrow, normalArray) {
   const side = new THREE.Vector3().crossVectors(normal, dir);
   if (side.lengthSq() < 1e-12) side.set(0, 0, 1).cross(dir);
   side.normalize();
+  const size = arrow.size * sizeFactor();
   const object = lines ? new THREE.LineSegments(geometry, placeholderLine) : new THREE.Mesh(geometry, placeholderMesh);
   object.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(dir, side, new THREE.Vector3().crossVectors(dir, side)));
   object.position.copy(v3(arrow.tip));
-  object.scale.setScalar(arrow.size);
+  object.scale.setScalar(size);
   object.userData.annotationPart = 'arrow';
-  object.userData.worldSize = arrow.size;
+  object.userData.worldSize = size;
   object.userData.minPx = MIN_ARROW_PX;
   return object;
 }
@@ -238,13 +314,10 @@ function tagObject(group, obj, type) {
   if (attributes.name) group.name = attributes.name;
 }
 
-export function buildAnnotation(obj) {
-  const g = obj.geometry;
-  const group = new THREE.Group();
-  tagObject(group, obj, 'Annotation');
-  group.userData.annotationKind = g.kind;
-  group.userData.text = g.text || '';
-
+/** One annotation's parts, from the worker's payload; rebuilt when options change. */
+function annotationParts(group) {
+  const g = group.userData.annotationData;
+  if (!g) return;
   const positions = g.lines.slice();
   if (g.dimensionLine) positions.push(...g.dimensionLine);
   if (positions.length) {
@@ -255,11 +328,37 @@ export function buildAnnotation(obj) {
     group.add(segments);
   }
   for (const arrow of g.arrows) group.add(buildArrow(arrow, g.normal));
-  if (g.label && g.text) {
+  if (g.label) {
     const label = buildLabel(g);
     if (label) group.add(label);
   }
+  group.userData.text = labelText(g);
+}
+
+export function buildAnnotation(obj) {
+  const group = new THREE.Group();
+  tagObject(group, obj, 'Annotation');
+  group.userData.annotationKind = obj.geometry.kind;
+  group.userData.annotationData = obj.geometry;
+  annotationParts(group);
   return group.children.length ? group : undefined;
+}
+
+/** Throws an annotation's parts away and builds them again with the current options. */
+export function rebuildAnnotation(group) {
+  for (const child of [...group.children]) {
+    group.remove(child);
+    disposePart(child);
+  }
+  annotationParts(group);
+}
+
+function disposePart(part) {
+  part.traverse((node) => {
+    if (node.userData.annotationPart === 'text') labelCount = Math.max(0, labelCount - 1);
+    if (node.geometry && !node.geometry.userData.shared) node.geometry.dispose();
+    if (node.material && node.material.userData && node.material.userData.perObject) node.material.dispose();
+  });
 }
 
 function pointInPolygon(x, y, pts) {
@@ -351,7 +450,7 @@ export function buildHatch(obj) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Per-frame scaling, disposal
+// Per-frame scaling and orientation, disposal
 // ---------------------------------------------------------------------------------------
 
 const _position = new THREE.Vector3();
@@ -383,8 +482,8 @@ function orientLabel(anchor, camera) {
   if (quad.scale.x !== sx || quad.scale.y !== sy) quad.scale.set(sx, sy, 1);
 }
 
-// Keeps labels and arrowheads at least a few pixels tall. `parts` is the list collected
-// by collectScaledParts(); only visible parts are touched.
+// Keeps labels and arrowheads at least a few pixels tall. `parts` is the list collected by
+// collectScaledParts(); only visible parts are touched.
 export function updateAnnotationScale(parts, camera, viewportHeight) {
   if (!parts.length) return;
   // The controls move the camera without refreshing its world matrix; the renderer only

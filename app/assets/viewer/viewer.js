@@ -5,14 +5,18 @@ import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import {
   ANNOTATION_TYPES,
+  annotationOptions,
   annotationOwner,
   buildAnnotation,
   buildHatch,
   collectScaledParts,
+  colorChoiceFor,
   disposeAnnotationResources,
   isScaledPart,
+  rebuildAnnotation,
   updateAnnotationScale,
 } from './annotations.js';
+import { ANNOTATION_COLORS, ANNOTATION_FONTS, ANNOTATION_SIZES, DEFAULT_QUALITY, QUALITY, UNITS } from './config.js';
 
 // ---------------------------------------------------------------------------------------
 // Start-up guard (installed by index.html before this module loads)
@@ -58,7 +62,9 @@ const VIEW_DIRECTIONS = {
 };
 const DISPLAY_MODES = ['shaded', 'shaded_edges', 'wireframe', 'ghosted', 'rendered'];
 const RENDER_QUALITIES = ['basic', 'full'];
-const CURVE_QUALITIES = ['standard', 'high', 'max'];
+// The fonts annotation labels are drawn with; canvas text must not be measured before the
+// browser has them (viewer.css declares them, config.js names them).
+const FONT_FAMILIES = ['Liberation Sans', 'Liberation Serif', 'Liberation Mono'];
 const MESH_TYPES = new Set(['Mesh', 'Brep', 'Extrusion', 'SubD']);
 // Object categories for the "Show" and selection-filter switches. Everything inside a
 // block instance also follows the `blocks` switch.
@@ -161,8 +167,21 @@ class ViewerLoader extends Rhino3dmLoader {
 
 const loader = new ViewerLoader()
   .setLibraryPath('./vendor/rhino3dm/')
-  .setWorkerLimit(1)
-  .setSubdivisionLevel(2);
+  .setWorkerLimit(1);
+
+// Curve sampling and SubD subdivision apply to the next load(); the label texture size and
+// the canvas resolution take effect at once (applyQuality()).
+function applyQuality(name) {
+  const quality = QUALITY[name] || QUALITY[DEFAULT_QUALITY];
+  annotationOptions.quality = QUALITY[name] ? name : DEFAULT_QUALITY;
+  loader.curveOptions = quality.curve;
+  loader.setSubdivisionLevel(quality.subdivision);
+  // The renderer is built later, in startViewer(); it reads the quality itself.
+  if (renderer) renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, quality.pixelRatio));
+}
+
+loader.curveOptions = QUALITY[DEFAULT_QUALITY].curve;
+loader.setSubdivisionLevel(QUALITY[DEFAULT_QUALITY].subdivision);
 
 // ---------------------------------------------------------------------------------------
 // Renderer, scene, cameras, controls
@@ -182,7 +201,8 @@ function createRenderer() {
   }, false);
   try {
     const created = new THREE.WebGLRenderer({ canvas: element, antialias: true, alpha: true, preserveDrawingBuffer: true });
-    created.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    const quality = QUALITY[annotationOptions.quality] || QUALITY[DEFAULT_QUALITY];
+    created.setPixelRatio(Math.min(window.devicePixelRatio || 1, quality.pixelRatio));
     created.setClearColor(0x000000, 0);
     return created;
   } catch (error) {
@@ -474,6 +494,13 @@ function textMaterialFor(texture, hex) {
   material.toneMapped = false;
   material.userData.perObject = true;
   return material;
+}
+
+// The colour an annotation or hatch is drawn in: the chosen dimension/text colour, or the
+// object's own (lifted if it is near black, like every other object).
+function annotationColorFor(group, layers) {
+  const chosen = group.userData.objectType === 'Annotation' ? colorChoiceFor(group.userData.annotationKind) : null;
+  return chosen ?? displayColorHex(objectColorHex(group.userData.attributes || {}, layers));
 }
 
 // Colours the parts of an annotation or hatch group in the group's colour.
@@ -864,6 +891,28 @@ function setCategoryPickable(category, pickable) {
 function pickableTarget(target) {
   const category = categoryOf(target);
   return !category || categoryPickable[category] !== false;
+}
+
+// Rebuilds every annotation from the payload the worker sent, with the current options
+// (size, colour, font, unit, label resolution). No re-read of the file, so it is instant.
+function rebuildAnnotations() {
+  if (!modelRoot) return;
+  const previous = picked;
+  unpick();
+  const layers = currentLayers();
+  const groups = [];
+  modelRoot.traverse((obj) => {
+    if (obj.userData.objectType === 'Annotation') groups.push(obj);
+  });
+  for (const group of groups) {
+    rebuildAnnotation(group);
+    colorAnnotationParts(group, annotationColorFor(group, layers));
+  }
+  scaledParts = collectScaledParts(modelRoot);
+  applyVisibility();
+  if (stats) stats.labels = groups.reduce((count, group) => count + (group.children.some((c) => c.userData.annotationPart === 'text') ? 1 : 0), 0);
+  if (previous && previous.target.parent) highlight(previous.target, previous.hit);
+  requestRender();
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1623,6 +1672,10 @@ async function load(options) {
       throw new Error('superseded by a newer load()');
     }
 
+    // Labels are measured with the bundled faces; a canvas would fall back to another font
+    // (and the wrong metrics) while they are still loading.
+    await fontsReady;
+
     emitProgress('build', 0);
     const t2 = performance.now();
     const lightCount = buildScene(root);
@@ -1652,6 +1705,10 @@ async function load(options) {
 function buildScene(root) {
   modelRoot = root;
   const layers = root.userData.layers || [];
+  const unitSystem = root.userData.settings && root.userData.settings.modelUnitSystem;
+  annotationOptions.modelUnits = unitSystem && typeof unitSystem.name === 'string'
+    ? unitSystem.name.replace(/^UnitSystem_/, '')
+    : 'Unknown';
   const loaderMaterials = new Set();
 
   let lightCount = 0;
@@ -1666,7 +1723,7 @@ function buildScene(root) {
     const attributes = obj.userData.attributes;
     if (!attributes) return;
     if (ANNOTATION_TYPES.has(obj.userData.objectType)) {
-      colorAnnotationParts(obj, displayColorHex(objectColorHex(attributes, layers)));
+      colorAnnotationParts(obj, annotationColorFor(obj, layers));
       return;
     }
     if (!(obj.isMesh || obj.isLine || obj.isPoints)) return;
@@ -1681,6 +1738,8 @@ function buildScene(root) {
   loader.materials = [];
 
   model.add(root);
+  // Test hook, like window.__viewerEvents: the harness reads annotation texts from it.
+  window.__viewerModelRoot = root;
   scaledParts = collectScaledParts(root);
   layerVisible = layers.map((layer) => layer.visible !== false);
   for (const category of CATEGORIES) {
@@ -1780,7 +1839,7 @@ function computeStats(root, timings, lightCount) {
     unmeshed,
     bbox,
     units,
-    curveQuality: loader.curveQuality,
+    quality: annotationOptions.quality,
     timings,
     warnings,
   };
@@ -1806,6 +1865,7 @@ function clear() {
     modelRoot = null;
   }
   scaledParts = [];
+  window.__viewerModelRoot = null;
   disposeAnnotationResources();
   disposeRenderMaterials();
   edgeJob = null;
@@ -1983,13 +2043,46 @@ function installApi() {
     },
     setCategoryVisible,
     setCategoryPickable,
-    // Applies to the next load(): curves are sampled while the file is parsed.
-    setCurveQuality(quality) {
-      if (!CURVE_QUALITIES.includes(quality)) {
-        log('warn', `Unknown curve quality "${quality}"`);
+    /**
+     * View quality (config.js): label resolution and canvas resolution change at once,
+     * curve sampling and SubD subdivision with the next load().
+     */
+    setQuality(quality) {
+      if (!QUALITY[quality]) {
+        log('warn', `Unknown quality "${quality}"`);
         return;
       }
-      loader.curveQuality = quality;
+      if (quality === annotationOptions.quality) return;
+      applyQuality(quality);
+      rebuildAnnotations();
+    },
+    /**
+     * Annotation size, dimension/text colour and font, and the unit lengths are shown in
+     * (config.js). Rebuilds the annotations in place.
+     */
+    setAnnotationOptions(options) {
+      const next = options && typeof options === 'object' ? options : {};
+      const valid = {
+        size: (v) => v in ANNOTATION_SIZES,
+        dimColor: (v) => v in ANNOTATION_COLORS,
+        textColor: (v) => v in ANNOTATION_COLORS,
+        dimFont: (v) => v in ANNOTATION_FONTS,
+        textFont: (v) => v in ANNOTATION_FONTS,
+        unit: (v) => v in UNITS,
+        unitFactor: (v) => typeof v === 'number' && isFinite(v) && v !== 0,
+      };
+      let changed = false;
+      for (const [key, check] of Object.entries(valid)) {
+        if (!(key in next)) continue;
+        if (!check(next[key])) {
+          log('warn', `Ignored annotation option ${key}="${next[key]}"`);
+          continue;
+        }
+        if (annotationOptions[key] === next[key]) continue;
+        annotationOptions[key] = next[key];
+        changed = true;
+      }
+      if (changed) rebuildAnnotations();
     },
     setRenderQuality(quality) {
       if (!RENDER_QUALITIES.includes(quality)) {
@@ -2031,6 +2124,15 @@ function installApi() {
 
 let workerReady = null;
 let workerState = 'pending';
+// Resolves once the bundled annotation faces are usable, or right away when the browser
+// has no font API; a failure is not fatal, the canvas then falls back.
+const fontsReady = document.fonts
+  ? Promise.all(FONT_FAMILIES.flatMap((family) => [
+    document.fonts.load(`40px "${family}"`),
+    document.fonts.load(`bold 40px "${family}"`),
+    document.fonts.load(`italic 40px "${family}"`),
+  ])).catch((error) => log('warn', `Annotation fonts failed to load: ${errorMessage(error)}`))
+  : Promise.resolve();
 
 // Fetches rhino3dm and spawns the decode worker. The worker's `_ready` (patched loader,
 // see PATCHES.md) settles once rhino3dm is instantiated inside it, so viewerReady means

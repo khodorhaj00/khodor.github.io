@@ -13,7 +13,14 @@ class AppSettings {
     this.meshQuality = MeshQuality.standard,
     this.cacheCapMb = 1024,
     this.hybridWebViewComposition = true,
-    this.curveQuality = CurveQuality.high,
+    this.quality = ViewQuality.normal,
+    this.annotationSize = AnnotationSize.medium,
+    this.dimensionColor = AnnotationColorChoice.file,
+    this.dimensionFont = AnnotationFontChoice.file,
+    this.textColor = AnnotationColorChoice.file,
+    this.textFont = AnnotationFontChoice.file,
+    this.unit = DisplayUnit.cm,
+    this.customUnitFactor = 1,
   });
 
   factory AppSettings.fromJson(Map<String, dynamic> json) => AppSettings(
@@ -24,7 +31,22 @@ class AppSettings {
     hybridWebViewComposition: json['hybridWebViewComposition'] is bool
         ? json['hybridWebViewComposition'] as bool
         : true,
-    curveQuality: CurveQuality.fromWire('${json['curveQuality'] ?? 'high'}'),
+    quality: ViewQuality.fromWire('${json['quality'] ?? 'normal'}'),
+    annotationSize: AnnotationSize.fromWire(
+      '${json['annotationSize'] ?? 'medium'}',
+    ),
+    dimensionColor: AnnotationColorChoice.fromWire(
+      '${json['dimensionColor'] ?? 'file'}',
+    ),
+    dimensionFont: AnnotationFontChoice.fromWire(
+      '${json['dimensionFont'] ?? 'file'}',
+    ),
+    textColor: AnnotationColorChoice.fromWire('${json['textColor'] ?? 'file'}'),
+    textFont: AnnotationFontChoice.fromWire('${json['textFont'] ?? 'file'}'),
+    unit: DisplayUnit.fromWire('${json['unit'] ?? 'cm'}'),
+    customUnitFactor: json['customUnitFactor'] is num
+        ? (json['customUnitFactor'] as num).toDouble()
+        : 1,
   );
 
   static const List<int> cacheCapChoicesMb = [256, 512, 1024, 2048, 4096];
@@ -39,8 +61,31 @@ class AppSettings {
   /// texture instead. See ARCHITECTURE.md 3.1.
   final bool hybridWebViewComposition;
 
-  /// How finely curves are drawn; applies to the next file opened.
-  final CurveQuality curveQuality;
+  /// How finely everything is drawn; curves and SubD apply to the next file
+  /// opened, label and canvas resolution at once.
+  final ViewQuality quality;
+
+  /// Annotation size, colours and fonts, and the unit lengths are shown in.
+  final AnnotationSize annotationSize;
+  final AnnotationColorChoice dimensionColor;
+  final AnnotationFontChoice dimensionFont;
+  final AnnotationColorChoice textColor;
+  final AnnotationFontChoice textFont;
+  final DisplayUnit unit;
+
+  /// Multiplier for [DisplayUnit.custom].
+  final double customUnitFactor;
+
+  /// What the viewer page's `setAnnotationOptions` takes.
+  Map<String, Object?> get annotationOptions => {
+    'size': annotationSize.wireName,
+    'dimColor': dimensionColor.wireName,
+    'dimFont': dimensionFont.wireName,
+    'textColor': textColor.wireName,
+    'textFont': textFont.wireName,
+    'unit': unit.wireName,
+    'unitFactor': customUnitFactor,
+  };
 
   bool get hasBackend => backendUrl.trim().isNotEmpty;
 
@@ -52,7 +97,14 @@ class AppSettings {
     'meshQuality': meshQuality.wireName,
     'cacheCapMb': cacheCapMb,
     'hybridWebViewComposition': hybridWebViewComposition,
-    'curveQuality': curveQuality.wireName,
+    'quality': quality.wireName,
+    'annotationSize': annotationSize.wireName,
+    'dimensionColor': dimensionColor.wireName,
+    'dimensionFont': dimensionFont.wireName,
+    'textColor': textColor.wireName,
+    'textFont': textFont.wireName,
+    'unit': unit.wireName,
+    'customUnitFactor': customUnitFactor,
   };
 
   AppSettings copyWith({
@@ -61,7 +113,14 @@ class AppSettings {
     MeshQuality? meshQuality,
     int? cacheCapMb,
     bool? hybridWebViewComposition,
-    CurveQuality? curveQuality,
+    ViewQuality? quality,
+    AnnotationSize? annotationSize,
+    AnnotationColorChoice? dimensionColor,
+    AnnotationFontChoice? dimensionFont,
+    AnnotationColorChoice? textColor,
+    AnnotationFontChoice? textFont,
+    DisplayUnit? unit,
+    double? customUnitFactor,
   }) => AppSettings(
     backendUrl: backendUrl ?? this.backendUrl,
     apiKey: apiKey ?? this.apiKey,
@@ -69,7 +128,14 @@ class AppSettings {
     cacheCapMb: cacheCapMb ?? this.cacheCapMb,
     hybridWebViewComposition:
         hybridWebViewComposition ?? this.hybridWebViewComposition,
-    curveQuality: curveQuality ?? this.curveQuality,
+    quality: quality ?? this.quality,
+    annotationSize: annotationSize ?? this.annotationSize,
+    dimensionColor: dimensionColor ?? this.dimensionColor,
+    dimensionFont: dimensionFont ?? this.dimensionFont,
+    textColor: textColor ?? this.textColor,
+    textFont: textFont ?? this.textFont,
+    unit: unit ?? this.unit,
+    customUnitFactor: customUnitFactor ?? this.customUnitFactor,
   );
 }
 

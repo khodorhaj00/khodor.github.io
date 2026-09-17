@@ -81,7 +81,12 @@ void main() {
       await bridge.setPointsVisible(true);
       await bridge.setCategoryVisible(ObjectCategory.annotations, false);
       await bridge.setCategoryPickable(ObjectCategory.surfaces, false);
-      await bridge.setCurveQuality(CurveQuality.max);
+      await bridge.setQuality(ViewQuality.ultra);
+      await bridge.setAnnotationOptions(const {
+        'size': 'large',
+        'unit': 'inch',
+        'unitFactor': 1,
+      });
       await bridge.setRenderQuality(RenderQuality.full);
       await bridge.setRenderLighting(false);
       await bridge.setMeasureMode(true);
@@ -101,7 +106,8 @@ void main() {
         'window.viewer.setPointsVisible(true)',
         'window.viewer.setCategoryVisible("annotations", false)',
         'window.viewer.setCategoryPickable("surfaces", false)',
-        'window.viewer.setCurveQuality("max")',
+        'window.viewer.setQuality("ultra")',
+        'window.viewer.setAnnotationOptions({"size":"large","unit":"inch","unitFactor":1})',
         'window.viewer.setRenderQuality("full")',
         'window.viewer.setRenderLighting(false)',
         'window.viewer.setMeasureMode(true)',
@@ -129,10 +135,38 @@ void main() {
         'hatches',
         'blocks',
       ]);
-      expect(CurveQuality.values.map((q) => q.wireName), [
-        'standard',
-        'high',
-        'max',
+      expect(ViewQuality.values.map((q) => q.wireName), [
+        'draft',
+        'normal',
+        'fine',
+        'ultra',
+      ]);
+      expect(DisplayUnit.values.map((u) => u.wireName), [
+        'file',
+        'mm',
+        'cm',
+        'm',
+        'inch',
+        'custom',
+      ]);
+      expect(AnnotationSize.values.map((s) => s.wireName), [
+        'small',
+        'medium',
+        'large',
+      ]);
+      expect(AnnotationColorChoice.values.map((c) => c.wireName), [
+        'file',
+        'white',
+        'amber',
+        'cyan',
+        'red',
+      ]);
+      expect(AnnotationFontChoice.values.map((f) => f.wireName), [
+        'file',
+        'sans',
+        'serif',
+        'mono',
+        'system',
       ]);
       expect(ViewerView.values.map((v) => v.name), [
         'iso',

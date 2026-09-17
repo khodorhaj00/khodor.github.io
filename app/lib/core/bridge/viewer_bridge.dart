@@ -138,9 +138,16 @@ class ViewerBridge {
   Future<void> setCategoryPickable(ObjectCategory category, bool pickable) =>
       _call('setCategoryPickable', [category.wireName, pickable]);
 
-  /// Takes effect with the next [load]: curves are sampled while parsing.
-  Future<void> setCurveQuality(CurveQuality quality) =>
-      _call('setCurveQuality', [quality.wireName]);
+  /// Label and canvas resolution change at once; curve sampling and SubD
+  /// smoothness with the next [load].
+  Future<void> setQuality(ViewQuality quality) =>
+      _call('setQuality', [quality.wireName]);
+
+  /// Annotation size, dimension/text colour and font, and the unit lengths are
+  /// shown in — see [AppSettings.annotationOptions]. Rebuilds the annotations
+  /// in place, so it is instant.
+  Future<void> setAnnotationOptions(Map<String, Object?> options) =>
+      _call('setAnnotationOptions', [options]);
 
   Future<void> setRenderQuality(RenderQuality quality) =>
       _call('setRenderQuality', [quality.wireName]);

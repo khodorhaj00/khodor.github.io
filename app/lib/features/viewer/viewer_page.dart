@@ -12,6 +12,7 @@ import 'package:share_plus/share_plus.dart';
 import '../../app/app_services.dart';
 import '../../app/format.dart';
 import '../../app/theme.dart';
+import '../../app/units.dart';
 import '../../core/bridge/internal_storage_path_handler_fix.dart';
 import '../../core/bridge/viewer_bridge.dart';
 import '../../core/models/model_stats.dart';
@@ -149,6 +150,38 @@ class _ViewerPageState extends State<ViewerPage> {
 
   AppServices get _services => widget.services;
 
+  /// The settings this page has already pushed to the viewer, so a change can
+  /// be told from a rebuild.
+  late AppSettings _appliedSettings;
+
+  /// Formats every length the app shows (caliper, picked object) the way the
+  /// viewer formats dimension labels.
+  LengthFormat get _lengths => LengthFormat(
+    unit: _services.settings.value.unit,
+    modelUnits: _stats?.units ?? '',
+    customFactor: _services.settings.value.customUnitFactor,
+  );
+
+  /// Settings changed while this page is open: annotation options apply at
+  /// once, a new quality also needs the file read again (curves and SubD are
+  /// sampled while parsing).
+  void _onSettingsChanged() {
+    final settings = _services.settings.value;
+    final previous = _appliedSettings;
+    _appliedSettings = settings;
+    final bridge = _bridge;
+    if (bridge == null) return;
+    if (!mapEquals(previous.annotationOptions, settings.annotationOptions)) {
+      bridge.setAnnotationOptions(settings.annotationOptions);
+      // The caliper panel and the picked card show the same units.
+      if (mounted) setState(() {});
+    }
+    if (previous.quality != settings.quality) {
+      bridge.setQuality(settings.quality);
+      if (_stats != null) unawaited(_startLoad());
+    }
+  }
+
   bool get _showingMeshed =>
       _loadingFileName == FileService.meshedName(_entry.sha);
 
@@ -162,11 +195,14 @@ class _ViewerPageState extends State<ViewerPage> {
     _hybridComposition = _services.settings.value.hybridWebViewComposition;
     // Before the first build, so no platform-view failure can beat it.
     _errorSubscription = _services.errors.errors.listen(_onUncaughtError);
+    _appliedSettings = _services.settings.value;
+    _services.settings.listenable.addListener(_onSettingsChanged);
     unawaited(_probeWebView());
   }
 
   @override
   void dispose() {
+    _services.settings.listenable.removeListener(_onSettingsChanged);
     unawaited(_errorSubscription?.cancel());
     _status.dispose();
     // Leaving the page must not leave the upload running in the background.
@@ -327,8 +363,8 @@ class _ViewerPageState extends State<ViewerPage> {
       }
       // The page may have been retried or left while reading.
       if (!mounted || !identical(bridge, _bridge)) return;
-      // Curves are sampled while the file is parsed, so this goes first.
-      await bridge.setCurveQuality(_services.settings.value.curveQuality);
+      // Curves and SubD are sampled while the file is parsed, so this goes first.
+      await bridge.setQuality(_services.settings.value.quality);
       await bridge.load(
         url: base64 == null ? '$_origin/files/$fileName' : null,
         base64: base64,
@@ -458,6 +494,7 @@ class _ViewerPageState extends State<ViewerPage> {
       }
     }
     if (_measuring) bridge.setMeasureMode(true);
+    bridge.setAnnotationOptions(_services.settings.value.annotationOptions);
     if (_projection != Projection.perspective) {
       bridge.setProjection(_projection);
     }
@@ -1031,7 +1068,7 @@ class _ViewerPageState extends State<ViewerPage> {
               bottom: kViewerToolbarHeight + bottomInset + kGap,
               child: MeasurePanel(
                 result: _measure,
-                units: stats.units,
+                lengths: _lengths,
                 onClear: () => _bridge?.clearMeasure(),
                 onClose: () => _setMeasuring(false),
               ),
@@ -1043,7 +1080,7 @@ class _ViewerPageState extends State<ViewerPage> {
               bottom: kViewerToolbarHeight + bottomInset + kGap,
               child: PickedCard(
                 object: picked,
-                units: stats.units,
+                lengths: _lengths,
                 onClose: () => setState(() => _picked = null),
               ),
             ),

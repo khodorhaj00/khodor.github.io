@@ -1,0 +1,10 @@
+Liberation Fonts 2.1.5 — SIL Open Font License 1.1 — https://github.com/liberationfonts/liberation-fonts
+Metric-compatible with Arial (Sans), Times New Roman (Serif) and Courier New (Mono), so annotation
+text keeps Rhino's spacing. Android ships none of those.
+
+Subset from the upstream release (1.4 MB instead of 3.0 MB) with:
+  python -m fontTools.subset <font>.ttf --output-file=<font>.ttf --layout-features='*' --name-IDs='*' \
+    --recalc-bounds --unicodes="U+0000-024F,U+0259,U+0370-03FF,U+0400-04FF,U+1E00-1EFF,U+2000-206F,\
+U+20A0-20BF,U+2100-214F,U+2150-218F,U+2190-21FF,U+2200-22FF,U+2300-23FF,U+25A0-25FF,U+2600-26FF,\
+U+FB00-FB06,U+FEFF"
+Anything outside those ranges (Arabic, CJK) falls back to the phone's own fonts.

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhino_viewer/app/theme.dart';
+import 'package:rhino_viewer/app/units.dart';
 import 'package:rhino_viewer/core/bridge/viewer_bridge.dart';
 import 'package:rhino_viewer/core/models/model_stats.dart';
 import 'package:rhino_viewer/core/models/viewer_events.dart';
@@ -569,7 +570,10 @@ void main() {
         host(
           MeasurePanel(
             result: result,
-            units: 'Millimeters',
+            lengths: const LengthFormat(
+              unit: DisplayUnit.file,
+              modelUnits: 'Millimeters',
+            ),
             onClear: () => cleared++,
             onClose: () => closed++,
           ),
@@ -622,7 +626,10 @@ void main() {
         host(
           PickedCard(
             object: pickedObject(userStrings: {'material': 'EPS'}),
-            units: 'Millimeters',
+            lengths: const LengthFormat(
+              unit: DisplayUnit.file,
+              modelUnits: 'Millimeters',
+            ),
             onClose: () => closed++,
           ),
         ),
@@ -641,7 +648,16 @@ void main() {
       expect(closed, 1);
 
       await tester.pumpWidget(
-        host(PickedCard(object: pickedObject(), units: 'None', onClose: () {})),
+        host(
+          PickedCard(
+            object: pickedObject(),
+            lengths: const LengthFormat(
+              unit: DisplayUnit.file,
+              modelUnits: 'None',
+            ),
+            onClose: () {},
+          ),
+        ),
       );
       expect(find.text('10 × 20.5 × 30'), findsOneWidget);
     });
@@ -653,13 +669,32 @@ void main() {
         host(
           PickedCard(
             object: pickedObject(blockName: 'unit_box'),
-            units: 'Millimeters',
+            lengths: const LengthFormat(
+              unit: DisplayUnit.file,
+              modelUnits: 'Millimeters',
+            ),
             onClose: () {},
           ),
         ),
       );
       expect(find.text('Block'), findsOneWidget);
       expect(find.text('unit_box'), findsOneWidget);
+    });
+
+    testWidgets('shows sizes in the chosen unit', (tester) async {
+      await tester.pumpWidget(
+        host(
+          PickedCard(
+            object: pickedObject(),
+            lengths: const LengthFormat(
+              unit: DisplayUnit.cm,
+              modelUnits: 'Millimeters',
+            ),
+            onClose: () {},
+          ),
+        ),
+      );
+      expect(find.text('1.0 × 2.0 × 3.0 cm'), findsOneWidget);
     });
 
     testWidgets("shows an annotation's kind and text", (tester) async {
@@ -673,7 +708,10 @@ void main() {
               'layerName': 'DIMS',
               'size': [100, 0, 0],
             }),
-            units: 'Millimeters',
+            lengths: const LengthFormat(
+              unit: DisplayUnit.file,
+              modelUnits: 'Millimeters',
+            ),
             onClose: () {},
           ),
         ),
@@ -701,7 +739,10 @@ void main() {
                 bottom: kViewerToolbarHeight + kGap,
                 child: PickedCard(
                   object: pickedObject(userStrings: strings),
-                  units: 'Millimeters',
+                  lengths: const LengthFormat(
+                    unit: DisplayUnit.file,
+                    modelUnits: 'Millimeters',
+                  ),
                   onClose: () {},
                 ),
               ),

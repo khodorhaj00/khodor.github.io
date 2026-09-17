@@ -69,10 +69,13 @@ unrelated to the app and untouched; everything for the viewer lives in `app/`, `
   colour, object count, search, all/none) · *Objects* (show/hide and a selection filter per type:
   surfaces, meshes, curves, points, annotations, hatches, blocks) · *Caliper* (tap two points,
   snapping to corners and curve ends: distance and ΔX/ΔY/ΔZ). Dimensions, text, leaders and hatches
-  are drawn at Rhino's sizes, fonts and alignment, and turn to stay readable; curves follow their
-  true shape (*Settings → Curve accuracy*: Standard / High / Max). *Display → Lighting* switches
-  the rendered mode's lighting off. Everything works offline; only the optional *Mesh on server*
-  needs a network. Tap an
+  are drawn at Rhino's sizes, fonts and alignment, and turn to stay readable. *Settings* holds one
+  *Quality* switch (Draft / Normal / Fine / Ultra: curves, SubD, annotation text and the screen
+  itself), the *Unit* every length is shown in (from file / mm / cm / m / inch / custom ×factor),
+  and the annotation *Size*, *Colour* and *Font* for dimensions and for text — five choices each,
+  with Sans, Serif and Mono bundled (Liberation, SIL OFL) so they match Arial, Times and Courier.
+  *Display → Lighting* switches the rendered mode's lighting off. Everything works offline; only
+  the optional *Mesh on server* needs a network. Tap an
   object for its name, layer, size in model units and user strings (a part inside a block reports the
   block instance and its block name, as Rhino selects it); objects hidden in Rhino stay hidden. Overflow
   menu: *Export GLB* (Y-up, shares the file), *Share original*, *Info* (stats, timings, warnings).
@@ -277,6 +280,7 @@ backend/                  Node 22 / Express 5 appserver: /health, /mesh, /conver
 samples/Rhino_Logo.3dm    real Rhino-saved sample (three.js repository)
 scripts/                  gen-keystore.sh, set-github-secrets.sh
 docs/ARCHITECTURE.md      contracts between app, viewer page, backend and CI
+docs/CUSTOMISING.md       what to edit for the changes that come up most often
 docs/BUILD_PLAYBOOK.md    how to rebuild the APK, pinned versions and why, and every
                           trap this build hit, for the next app like it
 .github/workflows/        build-apk.yml (analyze, test, APKs, release, viewer harness), backend-ci.yml
