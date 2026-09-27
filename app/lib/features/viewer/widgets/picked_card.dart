@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 
+import '../../../app/stitch.dart';
 import '../../../app/theme.dart';
 import '../../../app/units.dart';
 import '../../../core/models/model_stats.dart';
 
-/// Details of the tapped object, anchored above the toolbar. The name row
+/// The part card: details of the tapped object, anchored above the toolbar —
+/// PART and its name, the type badge, X / Y / Z size boxes, then the rest.
+/// The name row
 /// with the close button stays put; the attributes scroll below it, since
 /// production files carry dozens of user strings.
 class PickedCard extends StatelessWidget {
@@ -29,14 +32,21 @@ class PickedCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final size = lengths.formatTriple(object.size);
     return ConstrainedBox(
       constraints: BoxConstraints(
         maxHeight: MediaQuery.sizeOf(context).height * maxHeightFraction,
       ),
-      child: Card(
+      child: StitchPanel(
+        accent: true,
+        color: AppColors.surface.withValues(alpha: 0.96),
+        padding: EdgeInsets.zero,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(kGap * 2, 0, kGap / 2, kGap * 1.5),
+          padding: const EdgeInsets.fromLTRB(
+            kGap * 1.5,
+            0,
+            kGap / 2,
+            kGap * 1.5,
+          ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -44,14 +54,22 @@ class PickedCard extends StatelessWidget {
               Row(
                 children: [
                   Expanded(
-                    child: Text(
-                      object.displayName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppColors.text,
-                        fontWeight: FontWeight.w600,
-                      ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const TechLabel('Part', size: 10),
+                        Text(
+                          object.displayName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontFamily: kTitleFamily,
+                            color: AppColors.text,
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                   IconButton(
@@ -73,13 +91,34 @@ class PickedCard extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      _Row(label: 'Type', value: object.typeLabel),
+                      Wrap(
+                        spacing: kGap,
+                        runSpacing: kGap / 2,
+                        children: [StitchChip(object.typeLabel, filled: true)],
+                      ),
+                      const SizedBox(height: kGap),
+                      Row(
+                        children: [
+                          for (final (i, axis) in const [
+                            'X',
+                            'Y',
+                            'Z',
+                          ].indexed) ...[
+                            if (i > 0) const SizedBox(width: kGap / 2),
+                            Expanded(
+                              child: StatBox(
+                                label: axis,
+                                value: lengths.format(object.size[i]),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
                       if (object.text.isNotEmpty)
                         _Row(label: 'Text', value: object.text),
                       if (object.blockName.isNotEmpty)
                         _Row(label: 'Block', value: object.blockName),
                       _Row(label: 'Layer', value: object.layerName),
-                      _Row(label: 'Size', value: size, mono: true),
                       for (final entry in object.userStrings.entries)
                         _Row(label: entry.key, value: entry.value),
                     ],
@@ -95,11 +134,10 @@ class PickedCard extends StatelessWidget {
 }
 
 class _Row extends StatelessWidget {
-  const _Row({required this.label, required this.value, this.mono = false});
+  const _Row({required this.label, required this.value});
 
   final String label;
   final String value;
-  final bool mono;
 
   @override
   Widget build(BuildContext context) {
@@ -108,22 +146,11 @@ class _Row extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(
-            width: 64,
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: AppColors.muted, fontSize: 12),
-            ),
-          ),
+          SizedBox(width: 64, child: TechLabel(label, size: 10)),
           Expanded(
             child: Text(
               value,
-              style: (mono ? monoNumbers : const TextStyle()).copyWith(
-                color: AppColors.text,
-                fontSize: 12,
-              ),
+              style: const TextStyle(color: AppColors.text, fontSize: 12),
             ),
           ),
         ],

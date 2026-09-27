@@ -79,8 +79,10 @@ void main() {
   testWidgets('shows title, open button, hint and empty state', (tester) async {
     await tester.pumpWidget(app());
     await tester.pumpAndSettle();
-    expect(find.text('Rhino Viewer'), findsOneWidget);
-    expect(find.text('Open .3dm'), findsOneWidget);
+    expect(find.text('RHINO VIEWER'), findsOneWidget);
+    expect(find.text('FILE BROWSER'), findsOneWidget);
+    expect(find.text('SYS TELEMETRY'), findsOneWidget);
+    expect(find.text('OPEN .3DM FILE'), findsOneWidget);
     expect(
       find.textContaining('Also opens from Files, WhatsApp, Drive'),
       findsOneWidget,
@@ -202,7 +204,7 @@ void main() {
     );
     await tester.pumpWidget(app());
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Open .3dm'));
+    await tester.tap(find.text('OPEN .3DM FILE'));
     await settle(tester, () => opened.isNotEmpty && noSpinner());
     await tester.pumpAndSettle();
     expect(opened.single.name, 'picked.3dm');
@@ -222,7 +224,7 @@ void main() {
       );
       await tester.pumpWidget(app());
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Open .3dm'));
+      await tester.tap(find.text('OPEN .3DM FILE'));
       await settle(
         tester,
         () => find.byType(SnackBar).evaluate().isNotEmpty && noSpinner(),
@@ -237,7 +239,7 @@ void main() {
   testWidgets('cancelling the picker is a no-op', (tester) async {
     await tester.pumpWidget(app());
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Open .3dm'));
+    await tester.tap(find.text('OPEN .3DM FILE'));
     await tester.pumpAndSettle();
     expect(opened, isEmpty);
     expect(find.byType(SnackBar), findsNothing);

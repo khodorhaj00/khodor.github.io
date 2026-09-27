@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../app/format.dart';
+import '../../../app/stitch.dart';
 import '../../../app/theme.dart';
 import '../../../core/models/model_stats.dart';
 
@@ -100,9 +101,44 @@ class _LayersSheetState extends State<LayersSheet> {
     }
   }
 
+  /// Flips every listed layer.
+  void _invert() {
+    final targets = _shown;
+    setState(() {
+      for (final position in targets) {
+        _layers[position] = _layers[position].copyWith(
+          visible: !_layers[position].visible,
+        );
+      }
+    });
+    for (final position in targets) {
+      widget.onLayerToggled(_layers[position].index, _layers[position].visible);
+    }
+  }
+
+  /// Shows the listed layers and hides every other one. Needs a search, since
+  /// without one every layer is listed.
+  void _isolate() {
+    final targets = _shown.toSet();
+    final changed = <int>[];
+    setState(() {
+      for (var p = 0; p < _layers.length; p++) {
+        final visible = targets.contains(p);
+        if (_layers[p].visible != visible) {
+          _layers[p] = _layers[p].copyWith(visible: visible);
+          changed.add(p);
+        }
+      }
+    });
+    for (final p in changed) {
+      widget.onLayerToggled(_layers[p].index, _layers[p].visible);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final shown = _shown;
+    final visible = _layers.where((l) => l.visible).length;
     return DraggableScrollableSheet(
       expand: false,
       initialChildSize: LayersSheet.initialSize,
@@ -110,28 +146,54 @@ class _LayersSheetState extends State<LayersSheet> {
       builder: (context, controller) => Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(kGap * 2, kGap, kGap, 0),
+            padding: const EdgeInsets.fromLTRB(kGap * 2, kGap, kGap * 2, 0),
             child: Row(
               children: [
                 Expanded(
-                  child: Text(
-                    _query.isEmpty
-                        ? 'Layers'
-                        : 'Layers · ${formatCount(shown.length)} of ${formatCount(_layers.length)}',
-                    style: const TextStyle(
-                      color: AppColors.text,
-                      fontWeight: FontWeight.w600,
-                    ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const TechLabel('CAD inspect', size: 10),
+                      Text(
+                        _query.isEmpty
+                            ? 'LAYERS'
+                            : 'LAYERS · ${formatCount(shown.length)} OF ${formatCount(_layers.length)}',
+                        style: const TextStyle(
+                          fontFamily: kTitleFamily,
+                          color: AppColors.text,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                TextButton(
-                  onPressed: shown.isEmpty ? null : () => _all(true),
-                  child: const Text('All'),
+                TechLabel(
+                  '${formatCount(visible)} of ${formatCount(_layers.length)} visible',
+                  color: AppColors.accent,
+                  size: 10,
                 ),
-                TextButton(
-                  onPressed: shown.isEmpty ? null : () => _all(false),
-                  child: const Text('None'),
-                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(kGap * 2, kGap, kGap * 2, 0),
+            child: Row(
+              children: [
+                for (final (i, (label, action)) in [
+                  ('All vis', shown.isEmpty ? null : () => _all(true)),
+                  ('Hide all', shown.isEmpty ? null : () => _all(false)),
+                  ('Invert', shown.isEmpty ? null : _invert),
+                  (
+                    'Isolate',
+                    _query.isEmpty || shown.isEmpty ? null : _isolate,
+                  ),
+                ].indexed) ...[
+                  if (i > 0) const SizedBox(width: kGap / 2),
+                  Expanded(
+                    child: _SheetButton(label: label, onPressed: action),
+                  ),
+                ],
               ],
             ),
           ),
@@ -151,7 +213,8 @@ class _LayersSheetState extends State<LayersSheet> {
                 style: const TextStyle(color: AppColors.text, fontSize: 14),
                 decoration: InputDecoration(
                   isDense: true,
-                  hintText: 'Filter layers',
+                  hintText: 'SEARCH LAYER NAME...',
+                  hintStyle: techLabel,
                   prefixIcon: const Icon(Icons.search, size: 18),
                   suffixIcon: _query.isEmpty
                       ? null
@@ -201,6 +264,7 @@ class _LayerRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final rgb = layer.rgb;
     final nested = layer.fullPath != layer.name;
+    final text = layer.visible ? AppColors.text : AppColors.muted;
     return InkWell(
       onTap: () => onChanged(!layer.visible),
       child: Padding(
@@ -228,7 +292,7 @@ class _LayerRow extends StatelessWidget {
                     layer.name,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: AppColors.text, fontSize: 14),
+                    style: TextStyle(color: text, fontSize: 14),
                   ),
                   if (nested)
                     Text(
@@ -242,6 +306,13 @@ class _LayerRow extends StatelessWidget {
                     ),
                 ],
               ),
+            ),
+            Icon(
+              layer.visible
+                  ? Icons.visibility_outlined
+                  : Icons.visibility_off_outlined,
+              size: 16,
+              color: layer.visible ? AppColors.accent : AppColors.muted,
             ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: kGap),
@@ -258,4 +329,30 @@ class _LayerRow extends StatelessWidget {
       ),
     );
   }
+}
+
+/// ALL VIS / HIDE ALL / INVERT / ISOLATE.
+class _SheetButton extends StatelessWidget {
+  const _SheetButton({required this.label, required this.onPressed});
+
+  final String label;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) => OutlinedButton(
+    onPressed: onPressed,
+    style: OutlinedButton.styleFrom(
+      minimumSize: const Size(0, 36),
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+    ),
+    child: FittedBox(
+      child: Text(
+        label.toUpperCase(),
+        style: techLabel.copyWith(
+          color: onPressed == null ? AppColors.border : AppColors.text,
+          fontSize: 11,
+        ),
+      ),
+    ),
+  );
 }

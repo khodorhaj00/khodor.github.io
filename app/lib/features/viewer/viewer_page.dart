@@ -11,6 +11,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../../app/app_services.dart';
 import '../../app/format.dart';
+import '../../app/stitch.dart';
 import '../../app/theme.dart';
 import '../../app/units.dart';
 import '../../core/bridge/internal_storage_path_handler_fix.dart';
@@ -474,9 +475,17 @@ class _ViewerPageState extends State<ViewerPage> {
 
   // After a (re)load the page is back to its defaults; re-apply the user's
   // choices so a server-meshed reload keeps the same look.
+  /// Where the view cube goes: just below the header and its counts strip.
+  double _viewCubeTop() =>
+      MediaQuery.paddingOf(context).top +
+      StitchHeader.height +
+      (_stats == null ? 0 : _TopBar.statsHeight) +
+      kGap * 1.5;
+
   void _applyDisplayState() {
     final bridge = _bridge;
     if (bridge == null) return;
+    bridge.setViewCubeTop(_viewCubeTop());
     // Before the display mode, so the rendered look is built once.
     if (_renderQuality != RenderQuality.basic) {
       bridge.setRenderQuality(_renderQuality);
@@ -1033,6 +1042,7 @@ class _ViewerPageState extends State<ViewerPage> {
                   _TopBar(
                     name: _entry.name,
                     stats: stats,
+                    measuring: _measuring,
                     onBack: () => Navigator.of(context).maybePop(),
                     onMenu: _onMenu,
                   ),
@@ -1165,80 +1175,98 @@ class _ViewerPageState extends State<ViewerPage> {
   }
 }
 
+/// The Stitch header over the model: file name above CAD INSPECT (LIVE CALIPER
+/// while measuring), the Settings button, the ⋮ menu, then a strip of counts.
 class _TopBar extends StatelessWidget {
+  static const double statsHeight = 28;
+
   const _TopBar({
     required this.name,
     required this.stats,
+    required this.measuring,
     required this.onBack,
     required this.onMenu,
   });
 
   final String name;
   final ModelStats? stats;
+  final bool measuring;
   final VoidCallback onBack;
   final ValueChanged<_MenuAction> onMenu;
 
   @override
   Widget build(BuildContext context) {
     final stats = this.stats;
-    return Container(
-      height: 56,
-      decoration: BoxDecoration(
-        color: AppColors.bg.withValues(alpha: 0.85),
-        border: const Border(bottom: kBorder),
-      ),
-      child: Row(
-        children: [
-          IconButton(
-            onPressed: onBack,
-            icon: const Icon(Icons.arrow_back),
-            tooltip: 'Back',
-          ),
-          Expanded(
-            child: Text(
-              name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: AppColors.text, fontSize: 15),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        StitchHeader(
+          kicker: name,
+          title: measuring ? 'Live caliper session' : 'CAD inspect',
+          translucent: true,
+          onBack: onBack,
+          onSettings: () => onMenu(_MenuAction.settings),
+          actions: [
+            PopupMenuButton<_MenuAction>(
+              tooltip: 'More',
+              onSelected: onMenu,
+              itemBuilder: (_) => [
+                PopupMenuItem(
+                  value: _MenuAction.exportGlb,
+                  enabled: stats != null,
+                  child: const Text('Export GLB'),
+                ),
+                const PopupMenuItem(
+                  value: _MenuAction.shareOriginal,
+                  child: Text('Share original'),
+                ),
+                PopupMenuItem(
+                  value: _MenuAction.info,
+                  enabled: stats != null,
+                  child: const Text('Info'),
+                ),
+                const PopupMenuItem(
+                  value: _MenuAction.settings,
+                  child: Text('Settings'),
+                ),
+                // Always enabled: the report matters most when there is no
+                // model and nothing else to look at.
+                const PopupMenuItem(
+                  value: _MenuAction.diagnostics,
+                  child: Text('Diagnostics'),
+                ),
+              ],
+            ),
+          ],
+        ),
+        if (stats != null)
+          Container(
+            height: statsHeight,
+            padding: const EdgeInsets.symmetric(horizontal: kGap * 2),
+            decoration: BoxDecoration(
+              color: AppColors.bg.withValues(alpha: 0.75),
+              border: const Border(bottom: kBorder),
+            ),
+            child: Row(
+              children: [
+                _StatChip(label: 'objects', value: formatCount(stats.objects)),
+                const SizedBox(width: kGap * 2),
+                _StatChip(label: 'tris', value: formatCount(stats.triangles)),
+                const Spacer(),
+                Container(
+                  width: 6,
+                  height: 6,
+                  decoration: const BoxDecoration(
+                    color: AppColors.ok,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: kGap / 2),
+                const TechLabel('Loaded', color: AppColors.ok, size: 10),
+              ],
             ),
           ),
-          if (stats != null) ...[
-            _StatChip(label: 'objects', value: formatCount(stats.objects)),
-            const SizedBox(width: kGap / 2),
-            _StatChip(label: 'tris', value: formatCount(stats.triangles)),
-          ],
-          PopupMenuButton<_MenuAction>(
-            tooltip: 'More',
-            onSelected: onMenu,
-            itemBuilder: (_) => [
-              PopupMenuItem(
-                value: _MenuAction.exportGlb,
-                enabled: stats != null,
-                child: const Text('Export GLB'),
-              ),
-              const PopupMenuItem(
-                value: _MenuAction.shareOriginal,
-                child: Text('Share original'),
-              ),
-              PopupMenuItem(
-                value: _MenuAction.info,
-                enabled: stats != null,
-                child: const Text('Info'),
-              ),
-              const PopupMenuItem(
-                value: _MenuAction.settings,
-                child: Text('Settings'),
-              ),
-              // Always enabled: the report matters most when there is no
-              // model and nothing else to look at.
-              const PopupMenuItem(
-                value: _MenuAction.diagnostics,
-                child: Text('Diagnostics'),
-              ),
-            ],
-          ),
-        ],
-      ),
+      ],
     );
   }
 }
@@ -1251,27 +1279,16 @@ class _StatChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: kGap, vertical: 3),
-      decoration: const BoxDecoration(
-        color: AppColors.surface,
-        border: Border.fromBorderSide(kBorder),
-        borderRadius: kRadius,
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            value,
-            style: monoNumbers.copyWith(color: AppColors.text, fontSize: 12),
-          ),
-          const SizedBox(width: 4),
-          Text(
-            label,
-            style: const TextStyle(color: AppColors.muted, fontSize: 11),
-          ),
-        ],
-      ),
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        TechLabel(label, size: 10),
+        const SizedBox(width: 6),
+        Text(
+          value,
+          style: monoNumbers.copyWith(color: AppColors.accent, fontSize: 12),
+        ),
+      ],
     );
   }
 }

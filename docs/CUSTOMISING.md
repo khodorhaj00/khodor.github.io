@@ -95,3 +95,20 @@ Display menus hold the switches (Orthographic, Grid, Lighting, Textures & shadow
 `docs/ARCHITECTURE.md` is the contract between the app, the viewer page and the backend;
 `app/assets/viewer/PATCHES.md` documents every change made to the vendored three.js loader
 (annotations, hatches, curve sampling) and how to re-apply them after an upgrade.
+
+## The Stitch look (Build 2)
+
+| To change | Edit |
+|---|---|
+| Colours (amber accent, green "OK", panel shades) | `app/lib/app/theme.dart` → `AppColors` |
+| Fonts of titles / technical labels | `theme.dart` → `kTitleFamily`, `kMonoFamily`, `techLabel` |
+| Headers, panels, chips, info boxes, Settings button | `app/lib/app/stitch.dart` (every screen uses these) |
+| Home screen (Open button, SYS TELEMETRY, recent cards) | `app/lib/features/home/home_page.dart` |
+| What the telemetry boxes read from the phone | `MainActivity.kt` → `getDeviceInfo`, and `core/services/device_info_service.dart` |
+| View cube labels, size, colours | `app/assets/viewer/viewcube.js` (`FACES`, `HALF`) + `viewer.css` (`.viewcube*`) |
+| Logo in the headers | `app/assets/branding/logo.png` (128 px, transparent) |
+
+**App icon.** Source photo `app/tool/icon/bust_source.jpg`. In `app/tool/icon` run
+`python icon_cut.py bust_source.jpg bust_cut.png` (cuts the background out; needs Pillow and
+numpy), then `python make_icons.py` (writes every `mipmap-*/ic_launcher*.png` and the logo). The adaptive icon's background is transparent
+(`res/mipmap-anydpi-v26/ic_launcher.xml`).

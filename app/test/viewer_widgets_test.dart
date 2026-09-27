@@ -352,7 +352,7 @@ void main() {
         isTrue,
       );
 
-      await tester.tap(find.text('None'));
+      await tester.tap(find.text('HIDE ALL'));
       await tester.pump();
       expect(all, isFalse);
       expect(
@@ -396,11 +396,11 @@ void main() {
 
       await tester.enterText(find.byType(TextField), 'layer 14');
       await tester.pump();
-      expect(find.text('Layers · 11 of 150'), findsOneWidget);
+      expect(find.text('LAYERS · 11 OF 150'), findsOneWidget);
       expect(find.text('Layer 14'), findsOneWidget);
       expect(find.text('Layer 15'), findsNothing);
 
-      await tester.tap(find.text('None'));
+      await tester.tap(find.text('HIDE ALL'));
       await tester.pump();
       expect(allCalls, 0, reason: 'a filtered None must not hide everything');
       expect(toggles.map((t) => t.$1).toSet(), {
@@ -415,7 +415,7 @@ void main() {
 
       await tester.enterText(find.byType(TextField), 'group::layer 14');
       await tester.pump();
-      expect(find.text('Layers · 5 of 150'), findsOneWidget);
+      expect(find.text('LAYERS · 5 OF 150'), findsOneWidget);
 
       await tester.enterText(find.byType(TextField), 'nothing');
       await tester.pump();
@@ -423,9 +423,9 @@ void main() {
 
       await tester.tap(find.byTooltip('Clear filter'));
       await tester.pump();
-      expect(find.text('Layers'), findsOneWidget);
+      expect(find.text('LAYERS'), findsOneWidget);
       toggles.clear();
-      await tester.tap(find.text('All'));
+      await tester.tap(find.text('ALL VIS'));
       await tester.pump();
       expect(allCalls, 1);
       expect(toggles, isEmpty);
@@ -635,11 +635,13 @@ void main() {
         ),
       );
       expect(find.text('Bracket'), findsOneWidget);
-      expect(find.text('Polysurface'), findsOneWidget);
-      expect(find.text('Block'), findsNothing);
+      expect(find.text('POLYSURFACE'), findsOneWidget);
+      expect(find.text('BLOCK'), findsNothing);
       expect(find.text('PARTS'), findsOneWidget);
-      expect(find.text('10 × 20.5 × 30 mm'), findsOneWidget);
-      expect(find.text('material'), findsOneWidget);
+      expect(find.text('10 mm'), findsOneWidget);
+      expect(find.text('20.5 mm'), findsOneWidget);
+      expect(find.text('30 mm'), findsOneWidget);
+      expect(find.text('MATERIAL'), findsOneWidget);
       expect(find.text('EPS'), findsOneWidget);
       final close = tester.getSize(find.byType(IconButton));
       expect(close.width, greaterThanOrEqualTo(44));
@@ -659,7 +661,7 @@ void main() {
           ),
         ),
       );
-      expect(find.text('10 × 20.5 × 30'), findsOneWidget);
+      expect(find.text('20.5'), findsOneWidget);
     });
 
     testWidgets('names the block of a hit inside a block instance', (
@@ -677,7 +679,7 @@ void main() {
           ),
         ),
       );
-      expect(find.text('Block'), findsOneWidget);
+      expect(find.text('BLOCK'), findsOneWidget);
       expect(find.text('unit_box'), findsOneWidget);
     });
 
@@ -694,7 +696,7 @@ void main() {
           ),
         ),
       );
-      expect(find.text('1.0 × 2.0 × 3.0 cm'), findsOneWidget);
+      expect(find.text('2.0 cm'), findsOneWidget);
     });
 
     testWidgets("shows an annotation's kind and text", (tester) async {
@@ -716,9 +718,10 @@ void main() {
           ),
         ),
       );
-      // Title (no name) and Type row.
-      expect(find.text('Linear dimension'), findsNWidgets(2));
-      expect(find.text('Text'), findsOneWidget);
+      // Title (no name) and the type badge.
+      expect(find.text('Linear dimension'), findsOneWidget);
+      expect(find.text('LINEAR DIMENSION'), findsOneWidget);
+      expect(find.text('TEXT'), findsOneWidget);
       expect(find.text('328.4'), findsOneWidget);
     });
 

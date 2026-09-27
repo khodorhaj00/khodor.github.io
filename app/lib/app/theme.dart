@@ -10,6 +10,12 @@ abstract final class AppColors {
   static const Color accent = Color(0xFFFFB020);
   static const Color danger = Color(0xFFFF4D4F);
 
+  /// "Solid OK", live telemetry and other good news.
+  static const Color ok = Color(0xFF3DDC84);
+
+  /// Slightly darker than [surface], for tiles inside a panel.
+  static const Color inset = Color(0xFF111418);
+
   /// Foreground on accent-filled surfaces.
   static const Color onAccent = Color(0xFF14110A);
 }
@@ -25,10 +31,25 @@ const BorderSide kBorder = BorderSide(color: AppColors.border);
 
 const BorderRadius kRadius = BorderRadius.all(Radius.circular(4));
 
+/// The bundled Liberation faces (pubspec `fonts:`): Mono for technical labels and
+/// numbers, Sans for titles.
+const String kMonoFamily = 'LiberationMono';
+const String kTitleFamily = 'LiberationSans';
+
 /// Numbers are always monospace with tabular figures.
 const TextStyle monoNumbers = TextStyle(
-  fontFamily: 'monospace',
+  fontFamily: kMonoFamily,
+  fontFamilyFallback: ['monospace'],
   fontFeatures: [FontFeature.tabularFigures()],
+);
+
+/// Small upper-case technical label (`LAYER`, `SYS TELEMETRY`), as in the Stitch design.
+const TextStyle techLabel = TextStyle(
+  fontFamily: kMonoFamily,
+  fontFamilyFallback: ['monospace'],
+  fontSize: 11,
+  letterSpacing: 1.2,
+  color: AppColors.muted,
 );
 
 ThemeData buildAppTheme() {

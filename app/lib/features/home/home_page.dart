@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 
 import '../../app/app_services.dart';
 import '../../app/format.dart';
+import '../../app/stitch.dart';
 import '../../app/theme.dart';
 import '../../core/models/recent_file.dart';
+import '../../core/services/device_info_service.dart';
 import '../../core/services/file_service.dart';
 import '../settings/settings_page.dart';
 import '../viewer/widgets/diagnostics_sheet.dart';
@@ -14,7 +16,8 @@ typedef OpenEntryCallback = Future<void> Function(
   RecentFile entry,
 );
 
-/// Open button + recents (ARCHITECTURE.md §3.4). Navigation to the viewer is
+/// File browser: the Open button, the phone's telemetry and the recent files
+/// (ARCHITECTURE.md §3.4), in the Stitch look. Navigation to the viewer is
 /// injected so the page can be widget-tested without a WebView.
 class HomePage extends StatefulWidget {
   const HomePage({super.key, required this.services, required this.onOpen});
@@ -31,6 +34,10 @@ class _HomePageState extends State<HomePage> {
   bool _loaded = false;
   bool _busy = false;
 
+  /// Null until the phone answers, and on platforms without the channel.
+  DeviceInfo? _device;
+  bool _deviceAnswered = false;
+
   /// How long a swiped-away entry can be brought back before its cached
   /// file is deleted.
   static const Duration undoWindow = Duration(seconds: 5);
@@ -44,7 +51,36 @@ class _HomePageState extends State<HomePage> {
     super.initState();
     widget.services.cache.addListener(_refresh);
     _refresh();
+    _readDevice();
   }
+
+  Future<void> _readDevice() async {
+    final device = await widget.services.device.read();
+    if (!mounted) return;
+    setState(() {
+      _device = device;
+      _deviceAnswered = true;
+    });
+  }
+
+  void _openSettings() => Navigator.of(context)
+      .push(
+        MaterialPageRoute<void>(
+          builder: (_) => SettingsPage(services: widget.services),
+        ),
+      )
+      // Storage may have changed (Clear cache).
+      .then((_) => _readDevice());
+
+  void _showDiagnostics() => DiagnosticsSheet.show(
+    context,
+    report: buildAppReport(
+      at: DateTime.now(),
+      uncaught: widget.services.errors.records,
+      hybridComposition:
+          widget.services.settings.value.hybridWebViewComposition,
+    ),
+  );
 
   @override
   void dispose() {
@@ -148,106 +184,265 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     final recents = _visibleRecents;
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Rhino Viewer'),
-        actions: [
-          // Reachable even when the viewer screen cannot draw, which is when
-          // the report matters most.
-          IconButton(
-            tooltip: 'Diagnostics',
-            icon: const Icon(Icons.bug_report_outlined),
-            onPressed: () => DiagnosticsSheet.show(
-              context,
-              report: buildAppReport(
-                at: DateTime.now(),
-                uncaught: widget.services.errors.records,
-                hybridComposition:
-                    widget.services.settings.value.hybridWebViewComposition,
-              ),
+      body: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            StitchHeader(
+              kicker: 'Rhino Viewer',
+              title: 'File browser',
+              onSettings: _openSettings,
+              actions: [
+                // Reachable even when the viewer screen cannot draw, which is
+                // when the report matters most.
+                IconButton(
+                  tooltip: 'Diagnostics',
+                  icon: const Icon(Icons.bug_report_outlined),
+                  onPressed: _showDiagnostics,
+                ),
+              ],
             ),
-          ),
-          IconButton(
-            tooltip: 'Settings',
-            icon: const Icon(Icons.settings_outlined),
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => SettingsPage(services: widget.services),
-              ),
-            ),
-          ),
-        ],
-      ),
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              kGap * 2,
-              kGap * 2,
-              kGap * 2,
-              kGap,
-            ),
-            child: FilledButton.icon(
-              onPressed: _busy ? null : _pick,
-              icon: _busy
-                  ? const SizedBox.square(
-                      dimension: 18,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: AppColors.onAccent,
+            Expanded(
+              child: CustomScrollView(
+                slivers: [
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(
+                      kGap * 2,
+                      kGap * 2,
+                      kGap * 2,
+                      0,
+                    ),
+                    sliver: SliverList.list(
+                      children: [
+                        _OpenButton(busy: _busy, onPressed: _pick),
+                        const Padding(
+                          padding: EdgeInsets.only(top: kGap),
+                          child: Text.rich(
+                            TextSpan(
+                              text:
+                                  'Also opens from Files, WhatsApp, Drive via ',
+                              children: [
+                                TextSpan(
+                                  text: 'Open with',
+                                  style: TextStyle(fontStyle: FontStyle.italic),
+                                ),
+                              ],
+                            ),
+                            style: TextStyle(
+                              color: AppColors.muted,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: kGap * 2),
+                        _Telemetry(device: _device, answered: _deviceAnswered),
+                        SectionHeading(
+                          icon: Icons.history,
+                          label: 'Recent .3dm files',
+                          trailing: TechLabel(
+                            _loaded ? '${recents.length}' : '',
+                            size: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (!_loaded)
+                    const SliverToBoxAdapter(child: SizedBox.shrink())
+                  else if (recents.isEmpty)
+                    const SliverFillRemaining(
+                      hasScrollBody: false,
+                      child: Center(
+                        child: Text(
+                          'No recent files',
+                          style: TextStyle(color: AppColors.muted),
+                        ),
                       ),
                     )
-                  : const Icon(Icons.folder_open),
-              label: const Text('Open .3dm'),
-              style: FilledButton.styleFrom(minimumSize: const Size(0, 56)),
-            ),
-          ),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: kGap * 2),
-            child: Text.rich(
-              TextSpan(
-                text: 'Also opens from Files, WhatsApp, Drive via ',
-                children: [
-                  TextSpan(
-                    text: 'Open with',
-                    style: TextStyle(fontStyle: FontStyle.italic),
-                  ),
+                  else
+                    SliverPadding(
+                      padding: const EdgeInsets.fromLTRB(
+                        kGap * 2,
+                        0,
+                        kGap * 2,
+                        kGap * 2,
+                      ),
+                      sliver: SliverList.separated(
+                        itemCount: recents.length,
+                        separatorBuilder: (_, _) =>
+                            const SizedBox(height: kGap),
+                        itemBuilder: (_, i) => _RecentTile(
+                          entry: recents[i],
+                          latest: i == 0,
+                          onTap: () => _openRecent(recents[i]),
+                          onDelete: () => _delete(recents[i]),
+                        ),
+                      ),
+                    ),
                 ],
               ),
-              style: TextStyle(color: AppColors.muted, fontSize: 12),
             ),
-          ),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(kGap * 2, kGap * 3, kGap * 2, kGap),
-            child: Text(
-              'RECENT',
-              style: TextStyle(
-                color: AppColors.muted,
-                fontSize: 11,
-                letterSpacing: 1,
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The big amber button of the design: file icon, label, arrow.
+class _OpenButton extends StatelessWidget {
+  const _OpenButton({required this.busy, required this.onPressed});
+
+  final bool busy;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.accent,
+      borderRadius: kRadius,
+      child: InkWell(
+        borderRadius: kRadius,
+        onTap: busy ? null : onPressed,
+        child: Padding(
+          padding: const EdgeInsets.all(kGap * 1.5),
+          child: Row(
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  border: Border.all(color: AppColors.onAccent),
+                  borderRadius: kRadius,
+                ),
+                child: busy
+                    ? const Padding(
+                        padding: EdgeInsets.all(12),
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: AppColors.onAccent,
+                        ),
+                      )
+                    : const Icon(
+                        Icons.note_add_outlined,
+                        color: AppColors.onAccent,
+                      ),
               ),
+              const SizedBox(width: kGap * 1.5),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'OPEN .3DM FILE',
+                      style: TextStyle(
+                        fontFamily: kTitleFamily,
+                        color: AppColors.onAccent,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      'Tap to browse the phone or a USB drive',
+                      style: TextStyle(color: AppColors.onAccent, fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: AppColors.onAccent.withValues(alpha: 0.12),
+                  borderRadius: kRadius,
+                ),
+                child: const Icon(
+                  Icons.arrow_forward,
+                  color: AppColors.onAccent,
+                  size: 18,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// SYS TELEMETRY: what the phone really has — memory in use, free storage, the
+/// OpenGL ES version the 3D view runs on — and the installed app version.
+class _Telemetry extends StatelessWidget {
+  const _Telemetry({required this.device, required this.answered});
+
+  final DeviceInfo? device;
+  final bool answered;
+
+  static String _gb(int bytes) => (bytes / (1 << 30)).toStringAsFixed(1);
+
+  @override
+  Widget build(BuildContext context) {
+    final device = this.device;
+    final live = device != null;
+    return StitchPanel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: live ? AppColors.ok : AppColors.muted,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: kGap),
+              const Expanded(child: TechLabel('Sys telemetry')),
+              TechLabel(
+                live ? 'Live' : (answered ? 'Unavailable' : 'Reading…'),
+                color: live ? AppColors.ok : AppColors.muted,
+              ),
+            ],
+          ),
+          const SizedBox(height: kGap),
+          Row(
+            children: [
+              Expanded(
+                child: StatBox(
+                  label: 'Memory',
+                  value: live
+                      ? '${_gb(device.ramUsed)}/${_gb(device.ramTotal)} GB'
+                      : '—',
+                ),
+              ),
+              const SizedBox(width: kGap),
+              Expanded(
+                child: StatBox(
+                  label: 'Storage free',
+                  value: live ? '${_gb(device.storageFree)} GB' : '—',
+                ),
+              ),
+              const SizedBox(width: kGap),
+              Expanded(
+                child: StatBox(
+                  label: 'Graphics',
+                  value: live && device.glEs.isNotEmpty
+                      ? 'ES ${device.glEs}'
+                      : '—',
+                ),
+              ),
+            ],
+          ),
+          if (live) ...[
+            const SizedBox(height: kGap),
+            TechLabel(
+              'v${device.versionName} · ${device.model} · Android ${device.android}',
+              size: 10,
             ),
-          ),
-          Expanded(
-            child: !_loaded
-                ? const SizedBox.shrink()
-                : recents.isEmpty
-                ? const Center(
-                    child: Text(
-                      'No recent files',
-                      style: TextStyle(color: AppColors.muted),
-                    ),
-                  )
-                : ListView.separated(
-                    itemCount: recents.length,
-                    separatorBuilder: (_, _) => const Divider(),
-                    itemBuilder: (_, i) => _RecentTile(
-                      entry: recents[i],
-                      onTap: () => _openRecent(recents[i]),
-                      onDelete: () => _delete(recents[i]),
-                    ),
-                  ),
-          ),
+          ],
         ],
       ),
     );
@@ -259,11 +454,15 @@ class _RecentTile extends StatelessWidget {
     required this.entry,
     required this.onTap,
     required this.onDelete,
+    this.latest = false,
   });
 
   final RecentFile entry;
   final VoidCallback onTap;
   final VoidCallback onDelete;
+
+  /// The most recent file gets the amber edge.
+  final bool latest;
 
   @override
   Widget build(BuildContext context) {
@@ -272,44 +471,74 @@ class _RecentTile extends StatelessWidget {
       direction: DismissDirection.endToStart,
       onDismissed: (_) => onDelete(),
       background: Container(
-        color: AppColors.danger,
+        decoration: const BoxDecoration(
+          color: AppColors.danger,
+          borderRadius: kRadius,
+        ),
         alignment: Alignment.centerRight,
         padding: const EdgeInsets.only(right: kGap * 3),
         child: const Icon(Icons.delete_outline, color: AppColors.text),
       ),
-      child: ListTile(
-        onTap: onTap,
-        leading: const Icon(Icons.view_in_ar_outlined),
-        title: Text(entry.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-        subtitle: Text(
-          '${formatBytes(entry.size)} · ${formatRelative(entry.lastOpenedAt)}',
-          style: monoNumbers.copyWith(color: AppColors.muted, fontSize: 12),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: kRadius,
+          child: StitchPanel(
+            accent: latest,
+            child: Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: const BoxDecoration(
+                    color: AppColors.inset,
+                    border: Border.fromBorderSide(kBorder),
+                    borderRadius: kRadius,
+                  ),
+                  child: const Icon(
+                    Icons.view_in_ar_outlined,
+                    color: AppColors.text,
+                    size: 20,
+                  ),
+                ),
+                const SizedBox(width: kGap * 1.5),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        entry.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontFamily: kTitleFamily,
+                          color: latest ? AppColors.accent : AppColors.text,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        '${formatBytes(entry.size)} · ${formatRelative(entry.lastOpenedAt)}',
+                        style: monoNumbers.copyWith(
+                          color: AppColors.muted,
+                          fontSize: 12,
+                        ),
+                      ),
+                      if (entry.meshed) ...[
+                        const SizedBox(height: 4),
+                        const StitchChip('Meshed'),
+                      ],
+                    ],
+                  ),
+                ),
+                const Icon(Icons.chevron_right, color: AppColors.muted),
+              ],
+            ),
+          ),
         ),
-        trailing: entry.meshed ? const _Badge('MESHED') : null,
       ),
     );
   }
-}
-
-class _Badge extends StatelessWidget {
-  const _Badge(this.text);
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-    decoration: const BoxDecoration(
-      border: Border.fromBorderSide(BorderSide(color: AppColors.accent)),
-      borderRadius: kRadius,
-    ),
-    child: Text(
-      text,
-      style: const TextStyle(
-        color: AppColors.accent,
-        fontSize: 10,
-        letterSpacing: 1,
-      ),
-    ),
-  );
 }

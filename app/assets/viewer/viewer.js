@@ -16,6 +16,7 @@ import {
   rebuildAnnotation,
   updateAnnotationScale,
 } from './annotations.js';
+import { createViewCube } from './viewcube.js';
 import { ANNOTATION_COLORS, ANNOTATION_FONTS, ANNOTATION_SIZES, DEFAULT_QUALITY, QUALITY, UNITS } from './config.js';
 
 // ---------------------------------------------------------------------------------------
@@ -306,7 +307,11 @@ function renderFrame() {
   updateAnnotationScale(scaledParts, camera, appliedHeight || viewportHeight());
   updateMeasureLabel();
   renderer.render(scene, camera);
+  viewCube?.update(camera);
 }
+
+/** The corner cube (viewcube.js); null until startViewer. */
+let viewCube = null;
 
 function updateClipPlanes() {
   // Everything drawable lies inside a sphere around the model centre; the grid may be
@@ -2017,6 +2022,13 @@ function installApi() {
     fit,
     setView,
     setProjection,
+    /** Moves the view cube down to clear the app's header (CSS px from the top). */
+    setViewCubeTop(px) {
+      viewCube?.setTop(px);
+    },
+    setViewCubeVisible(visible) {
+      viewCube?.setVisible(Boolean(visible));
+    },
     setDisplayMode(mode) {
       if (!DISPLAY_MODES.includes(mode)) {
         log('warn', `Unknown display mode "${mode}"`);
@@ -2161,6 +2173,7 @@ function startViewer() {
   document.body.appendChild(canvas);
   attachCanvasListeners();
   attachPointerListeners();
+  viewCube = createViewCube(setView);
   observeViewport();
   createControls();
   applyViewportSize();

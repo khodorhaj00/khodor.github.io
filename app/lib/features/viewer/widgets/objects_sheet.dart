@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../app/format.dart';
+import '../../../app/stitch.dart';
 import '../../../app/theme.dart';
 import '../../../core/models/viewer_options.dart';
 
@@ -88,12 +89,20 @@ class _ObjectsSheetState extends State<ObjectsSheet> {
             child: Row(
               children: [
                 Expanded(
-                  child: Text(
-                    'Objects',
-                    style: TextStyle(
-                      color: AppColors.text,
-                      fontWeight: FontWeight.w600,
-                    ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      TechLabel('CAD inspect', size: 10),
+                      Text(
+                        'OBJECTS',
+                        style: TextStyle(
+                          fontFamily: kTitleFamily,
+                          color: AppColors.text,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
                 _ColumnLabel('Show'),

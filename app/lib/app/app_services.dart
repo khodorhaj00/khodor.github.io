@@ -2,6 +2,7 @@ import 'dart:io';
 
 import '../core/services/backend_client.dart';
 import '../core/services/cache_service.dart';
+import '../core/services/device_info_service.dart';
 import '../core/services/file_service.dart';
 import '../core/services/intent_service.dart';
 import '../core/services/platform_error_monitor.dart';
@@ -19,6 +20,7 @@ class AppServices {
     required this.settings,
     required this.intents,
     required this.errors,
+    this.device = const DeviceInfoService(),
   });
 
   /// `<application support>/models/` — served to the viewer as `/files/`.
@@ -36,4 +38,7 @@ class AppServices {
   /// listens, because a platform view that fails to be created surfaces
   /// nowhere else.
   final PlatformErrorMonitor errors;
+
+  /// Memory, storage, GPU and version for the home screen's telemetry.
+  final DeviceInfoService device;
 }

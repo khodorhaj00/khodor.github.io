@@ -114,6 +114,9 @@ class ViewerBridge {
 
   Future<void> setView(ViewerView view) => _call('setView', [view.name]);
 
+  /// Moves the view cube down to clear the app's header (logical px = CSS px).
+  Future<void> setViewCubeTop(double px) => _call('setViewCubeTop', [px]);
+
   Future<void> setProjection(Projection projection) =>
       _call('setProjection', [projection.name]);
 

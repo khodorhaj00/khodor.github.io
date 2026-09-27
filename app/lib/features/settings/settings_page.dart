@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../app/app_services.dart';
 import '../../app/format.dart';
+import '../../app/stitch.dart';
 import '../../app/theme.dart';
 import '../../app/versions.dart';
 import '../../core/models/viewer_options.dart';
@@ -147,7 +148,17 @@ class _SettingsPageState extends State<SettingsPage> {
     final settings = _settings;
     final usage = _diskUsage;
     return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
+      appBar: PreferredSize(
+        preferredSize: const Size.fromHeight(StitchHeader.height),
+        child: SafeArea(
+          bottom: false,
+          child: StitchHeader(
+            kicker: 'Rhino Viewer',
+            title: 'Settings',
+            onBack: () => Navigator.of(context).maybePop(),
+          ),
+        ),
+      ),
       body: ListView(
         padding: const EdgeInsets.all(kGap * 2),
         children: [

@@ -573,6 +573,30 @@ async function pageCheckAnnotations(page) {
     window.viewer.setGrid(true);
     window.viewer.setView('iso');
   });
+  await checkViewCube(page);
+}
+
+// The corner cube follows the camera, and tapping a face turns the camera to face it.
+async function checkViewCube(page) {
+  // Z of the face's outward normal on screen: 1 = facing the viewer.
+  const facing = (view) => page.evaluate((v) => {
+    const el = document.querySelector(`.viewcube-face[data-view="${v}"]`);
+    return el ? new DOMMatrix(getComputedStyle(el).transform).m33 : NaN;
+  }, view);
+  check(await page.locator('.viewcube-face').count() === 6, 'view cube: six faces');
+  for (const view of ['top', 'front', 'right']) {
+    await page.evaluate((v) => document.querySelector(`.viewcube-face[data-view="${v}"]`).click(), view);
+    await settle(page);
+    const z = await facing(view);
+    check(z > 0.99, `view cube: tapping ${view.toUpperCase()} turns that face to the viewer (normal z ${z.toFixed(3)})`);
+  }
+  await page.evaluate(() => window.viewer.setViewCubeTop(140));
+  checkEqual(await page.evaluate(() => document.querySelector('.viewcube').style.top), '140px', 'view cube: setViewCubeTop moves it');
+  await page.evaluate(() => document.querySelector(".viewcube-iso").click());
+  await settle(page);
+  const iso = await facing('top');
+  check(iso > 0.2 && iso < 0.95, `view cube: ISO shows the top at an angle (normal z ${iso.toFixed(3)})`);
+  await page.screenshot({ path: path.join(outDir, 'view_cube_iso.png') });
 }
 
 async function pageCheckTexturedRendered(page) {

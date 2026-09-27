@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../app/stitch.dart';
 import '../../../app/theme.dart';
 import '../../../app/units.dart';
 import '../../../core/models/viewer_events.dart';
@@ -33,7 +34,10 @@ class MeasurePanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final distance = result.distance;
     final delta = result.delta;
-    return Card(
+    return StitchPanel(
+      accent: true,
+      color: AppColors.surface.withValues(alpha: 0.96),
+      padding: EdgeInsets.zero,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(kGap * 2, kGap / 2, kGap / 2, kGap),
         child: Column(
@@ -45,14 +49,9 @@ class MeasurePanel extends StatelessWidget {
                 const Icon(Icons.straighten, size: 16, color: AppColors.accent),
                 const SizedBox(width: kGap),
                 const Expanded(
-                  child: Text(
-                    'CALIPER',
-                    style: TextStyle(
-                      color: AppColors.accent,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 1,
-                    ),
+                  child: TechLabel(
+                    'Caliper · point to point',
+                    color: AppColors.accent,
                   ),
                 ),
                 if (result.points.isNotEmpty)
@@ -69,8 +68,8 @@ class MeasurePanel extends StatelessWidget {
               Text(
                 lengths.format(distance),
                 style: monoNumbers.copyWith(
-                  color: AppColors.text,
-                  fontSize: 22,
+                  color: AppColors.accent,
+                  fontSize: 26,
                   fontWeight: FontWeight.w600,
                 ),
               )
@@ -83,13 +82,15 @@ class MeasurePanel extends StatelessWidget {
               const SizedBox(height: kGap / 2),
               Row(
                 children: [
-                  for (final (i, axis) in const ['ΔX', 'ΔY', 'ΔZ'].indexed)
+                  for (final (i, axis) in const ['ΔX', 'ΔY', 'ΔZ'].indexed) ...[
+                    if (i > 0) const SizedBox(width: kGap / 2),
                     Expanded(
-                      child: _Delta(
-                        axis: axis,
+                      child: StatBox(
+                        label: axis,
                         value: lengths.bare(delta[i].abs()),
                       ),
                     ),
+                  ],
                 ],
               ),
             ],
@@ -120,27 +121,4 @@ class MeasurePanel extends StatelessWidget {
       ),
     );
   }
-}
-
-class _Delta extends StatelessWidget {
-  const _Delta({required this.axis, required this.value});
-
-  final String axis;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) => Row(
-    children: [
-      Text(axis, style: const TextStyle(color: AppColors.muted, fontSize: 11)),
-      const SizedBox(width: 4),
-      Flexible(
-        child: Text(
-          value,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: monoNumbers.copyWith(color: AppColors.text, fontSize: 13),
-        ),
-      ),
-    ],
-  );
 }

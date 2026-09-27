@@ -1,11 +1,14 @@
 package com.styro3d.rhino_viewer
 
+import android.app.ActivityManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.StatFs
 import android.provider.OpenableColumns
 import android.widget.Toast
 import io.flutter.embedding.android.FlutterActivity
@@ -47,6 +50,35 @@ class MainActivity : FlutterActivity() {
                 }
             }
         }
+        // Real numbers for the home screen's telemetry boxes: memory, storage, the OpenGL
+        // ES version the GPU offers, and the installed app version.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DEVICE_CHANNEL).setMethodCallHandler { call, result ->
+            if (call.method == "getDeviceInfo") result.success(deviceInfo()) else result.notImplemented()
+        }
+    }
+
+    private fun deviceInfo(): Map<String, Any?> {
+        val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val memory = ActivityManager.MemoryInfo().also { activityManager.getMemoryInfo(it) }
+        val stat = StatFs(filesDir.absolutePath)
+        val glEs = activityManager.deviceConfigurationInfo.glEsVersion
+        val packageInfo = packageManager.getPackageInfo(packageName, 0)
+        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            packageInfo.longVersionCode
+        } else {
+            @Suppress("DEPRECATION") packageInfo.versionCode.toLong()
+        }
+        return mapOf(
+            "ramTotal" to memory.totalMem,
+            "ramAvailable" to memory.availMem,
+            "storageTotal" to stat.totalBytes,
+            "storageFree" to stat.availableBytes,
+            "glEs" to glEs,
+            "versionName" to packageInfo.versionName,
+            "versionCode" to versionCode,
+            "model" to "${Build.MANUFACTURER} ${Build.MODEL}",
+            "android" to Build.VERSION.RELEASE,
+        )
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -188,6 +220,7 @@ class MainActivity : FlutterActivity() {
 
     private companion object {
         const val CHANNEL = "com.styro3d.rhino_viewer/intent"
+        const val DEVICE_CHANNEL = "com.styro3d.rhino_viewer/device"
         const val INCOMING_DIR = "incoming"
         const val DEFAULT_NAME = "received.3dm"
         const val PARTIAL_NAME = ".partial"

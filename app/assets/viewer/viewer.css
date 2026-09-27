@@ -97,3 +97,69 @@ canvas {
   font-style: normal;
   font-display: block;
 }
+
+/* View cube (viewcube.js). Edge = 2 × HALF there (52 px). */
+.viewcube {
+  position: fixed;
+  top: 108px;
+  right: 12px;
+  width: 64px;
+  height: 84px;
+  z-index: 10;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.viewcube[hidden] { display: none; }
+.viewcube-stage {
+  position: absolute;
+  left: 32px;
+  top: 32px;
+  width: 0;
+  height: 0;
+  transform-style: preserve-3d;
+}
+.viewcube-face {
+  position: absolute;
+  left: -26px;
+  top: -26px;
+  width: 52px;
+  height: 52px;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #FFB020;
+  background: rgba(22, 26, 31, 0.88);
+  color: #E6E8EB;
+  font: 700 10px 'Liberation Mono', monospace;
+  letter-spacing: 0.5px;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  cursor: pointer;
+}
+.viewcube-face:active { background: rgba(255, 176, 32, 0.35); }
+.viewcube-axis {
+  position: absolute;
+  left: -5px;
+  top: -7px;
+  font: 700 11px 'Liberation Mono', monospace;
+  pointer-events: none;
+}
+.viewcube-axis-x { color: #FF4D4F; }
+.viewcube-axis-y { color: #3DDC84; }
+.viewcube-axis-z { color: #4DA3FF; }
+.viewcube-iso {
+  position: absolute;
+  left: 12px;
+  bottom: 0;
+  width: 40px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #262B33;
+  border-radius: 3px;
+  background: rgba(14, 16, 19, 0.88);
+  color: #8B93A1;
+  font: 700 10px 'Liberation Mono', monospace;
+  cursor: pointer;
+}
