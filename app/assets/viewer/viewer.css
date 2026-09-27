@@ -1,0 +1,165 @@
+:root {
+  --bg-top: #1B1F26;
+  --bg-bottom: #0E1013;
+  color-scheme: dark;
+}
+
+/* The page paints its own opaque dark background instead of relying on being composited
+   over the app: if the canvas ever draws nothing (no WebGL, a lost context), the user sees
+   this, never the host view behind it. index.html also inserts #viewer-backdrop, styled
+   inline with the same gradient, so the background survives this stylesheet not loading. */
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--bg-bottom);
+  /* Renderer clears to transparent; the gradient behind it is the page background. */
+  background-image: linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+canvas {
+  display: block;
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  /* Above #viewer-backdrop, below the failure screen. */
+  z-index: 1;
+  touch-action: none;
+  outline: none;
+}
+
+/* Liberation fonts (fonts/VERSION): metric-compatible with Arial, Times New Roman and
+   Courier New, none of which Android has. Annotation labels are drawn into a canvas, so
+   the faces must be loaded before any text is measured — viewer.js waits for them. */
+@font-face {
+  font-family: 'Liberation Sans';
+  src: url('./fonts/LiberationSans-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Liberation Sans';
+  src: url('./fonts/LiberationSans-Bold.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Liberation Sans';
+  src: url('./fonts/LiberationSans-Italic.ttf') format('truetype');
+  font-weight: 400;
+  font-style: italic;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Liberation Sans';
+  src: url('./fonts/LiberationSans-BoldItalic.ttf') format('truetype');
+  font-weight: 700;
+  font-style: italic;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Liberation Serif';
+  src: url('./fonts/LiberationSerif-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Liberation Serif';
+  src: url('./fonts/LiberationSerif-Bold.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Liberation Serif';
+  src: url('./fonts/LiberationSerif-Italic.ttf') format('truetype');
+  font-weight: 400;
+  font-style: italic;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Liberation Mono';
+  src: url('./fonts/LiberationMono-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+/* View cube (viewcube.js). Edge = 2 × HALF there (52 px). */
+.viewcube {
+  position: fixed;
+  top: 108px;
+  right: 12px;
+  width: 64px;
+  height: 84px;
+  z-index: 10;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.viewcube[hidden] { display: none; }
+.viewcube-stage {
+  position: absolute;
+  left: 32px;
+  top: 32px;
+  width: 0;
+  height: 0;
+  transform-style: preserve-3d;
+}
+.viewcube-face {
+  position: absolute;
+  left: -26px;
+  top: -26px;
+  width: 52px;
+  height: 52px;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #FFB020;
+  background: rgba(22, 26, 31, 0.88);
+  color: #E6E8EB;
+  font: 700 10px 'Liberation Mono', monospace;
+  letter-spacing: 0.5px;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  cursor: pointer;
+}
+.viewcube-face:active { background: rgba(255, 176, 32, 0.35); }
+.viewcube-axis {
+  position: absolute;
+  left: -5px;
+  top: -7px;
+  font: 700 11px 'Liberation Mono', monospace;
+  pointer-events: none;
+}
+.viewcube-axis-x { color: #FF4D4F; }
+.viewcube-axis-y { color: #3DDC84; }
+.viewcube-axis-z { color: #4DA3FF; }
+.viewcube-iso {
+  position: absolute;
+  left: 12px;
+  bottom: 0;
+  width: 40px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #262B33;
+  border-radius: 3px;
+  background: rgba(14, 16, 19, 0.88);
+  color: #8B93A1;
+  font: 700 10px 'Liberation Mono', monospace;
+  cursor: pointer;
+}
