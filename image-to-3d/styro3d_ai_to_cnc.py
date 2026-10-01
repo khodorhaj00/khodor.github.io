@@ -1055,10 +1055,21 @@ def extrude_span(curve, axis, a0, length):
     [a0, a0 + length] along world axis 0/1/2 (works whichever way it went)."""
     if curve is None:
         return None
+    b = None
     ext = rg.Extrusion.Create(curve, length, True)
-    if ext is None:
-        return None
-    b = ext.ToBrep(True)
+    if ext is not None:
+        b = ext.ToBrep(True)
+    if b is None:   # fallback: straight surface extrusion along the axis, then cap
+        vec = [0.0, 0.0, 0.0]
+        vec[axis] = length
+        srf = rg.Surface.CreateExtrusion(curve, V(vec[0], vec[1], vec[2]))
+        if srf is None:
+            return None
+        b = rg.Brep.CreateFromSurface(srf)
+        capped = b.CapPlanarHoles(BUILD_TOL) if b is not None else None
+        b = capped or b
+        if b is None:
+            return None
     bb = b.GetBoundingBox(True)
     shift = [0.0, 0.0, 0.0]
     shift[axis] = a0 - (bb.Min.X, bb.Min.Y, bb.Min.Z)[axis]
@@ -1148,7 +1159,7 @@ def build_body(add):
     for s in (-1, 1):
         side = "R" if s < 0 else "L"
         add(subd_from_cage(*tube_cage(
-            [(s * 92, 0, 935), (s * 95, -2, 740), (s * 100, -8, 505), (s * 102, -2, 360), (s * 106, 6, 112)],
+            [(s * 92, 0, 935), (s * 95, -2, 740), (s * 100, -8, 505), (s * 102, -2, 360), (s * 106, 8, 92)],
             [(94, 90), (80, 78), (60, 60), (62, 60), (42, 42)])), "skin", "leg_" + side)
         add(subd_from_cage(*tube_cage(
             [(s * 108, 55, 58), (s * 110, 5, 52), (s * 114, -85, 40), (s * 118, -172, 30)],
@@ -1227,11 +1238,11 @@ def build_belt(add, plate):
         add(plate_box, "brass", "belt_plate")
     # apron: 6 studded straps hanging from the belt, tilted 6 deg forward
     t_strap = max(5.0, plate)
-    y_top = cyb - (ryb + 19.0)          # strap back face overlaps the belt by ~1.5 mm
+    y_top = cyb - (ryb + 17.0)          # strap back face sinks ~4 mm into the belt
     for i in range(6):
         x = -62.5 + 25.0 * i
         tilt = rg.Transform.Rotation(math.radians(-6.0), rg.Vector3d.XAxis, P(x, y_top, 986.0))
-        pieces = [(box(P(x, y_top, 861.0), 18.0, t_strap, 250.0), "leather")]
+        pieces = [(box(P(x, y_top, 868.0), 18.0, t_strap, 264.0), "leather")]   # top 14 mm inside the belt
         for j in range(5):
             pieces.append((sphere(P(x, y_top - t_strap / 2.0, 956.0 - 48.0 * j), 6.5), "brass"))
         for geom, key in pieces:
@@ -1311,7 +1322,7 @@ def build_shield(add, plate):
         boss.Transform(rg.Transform.Translation(V(0, 0, H / 2.0)))
         parts.append((boss, "brass", "shield_boss"))
     # outer-face centre at the origin -> turn 35 deg to face front-left -> in front of the left fist
-    xf = rg.Transform.Translation(V(358.0, -220.0, 900.0 - H / 2.0)) * \
+    xf = rg.Transform.Translation(V(337.0, -190.0, 900.0 - H / 2.0)) * \
         rg.Transform.Rotation(math.radians(35.0), rg.Vector3d.ZAxis, P(0, 0, 0))
     for geom, key, name in parts:
         if geom is not None:

@@ -92,11 +92,23 @@ The session container itself also runs Blender as a Python module (`pip install 
 - `06` is the foam blocks.
 - `S3D_Legionary::*` holds the built figure, one layer per material.
 
+**Mode 2 output** (offline layout check built from the same numbers; Rhino shows it smoother, with PBR materials):
+
+![Mode 2 layout check](mode2_layout_check.png)
+
 **Limits:**
 - Rhino 7 has no ShrinkWrap. If a mesh stays open, run MeshRepair, or remesh it in Blender (Voxel) or with Meshy Remesh.
 - Mode 2 is a stylised figure, not a photo match. Nudge parts with Gumball if needed.
 - Thin plates (shoulder bands, cheek guards, apron straps) get flagged for foam. Set *Min plate thickness* to 15+ mm, or cut them from ACP or wood.
-- The API calls were checked against the official RhinoCommon 7.38 and 8.35 SDKs, and the geometry code passed offline tests. I could not test it inside Rhino here. If anything errors, paste the command-line text back.
+
+**How it was checked:**
+- Every RhinoCommon call was checked against the official 7.38 and 8.35 SDKs.
+- Offline tests passed:
+  - Python 2.7 and 3 syntax.
+  - Every SubD cage is closed and outward-facing.
+  - The STL is watertight.
+  - Mode 2 parts touch each other: feet sink 13 mm into the base, the shield grips the hand at 5 mm, and nothing collides.
+- It has not been run inside Rhino. If anything errors, paste the command-line text back.
 
 ---
 
