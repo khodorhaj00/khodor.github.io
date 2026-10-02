@@ -75,27 +75,32 @@ Everything is automatic:
 
 Full details and the prompt for a good sheet are in [`views_to_3d/README.md`](views_to_3d/README.md).
 
-**Test on a shape with a known truth** (`views_to_3d/selftest.py`): an asymmetric 790 mm "kettle" with a spout, a handle ring, a front plate and a back fin, rendered as sheets.
+**Tests on shapes with a known truth** (`views_to_3d/selftest.py`). Sheets were rendered from 2 objects whose real shape is known; the tool rebuilt them from the sheets alone.
+- **Kettle:** asymmetric, 790 mm, with a spout, a handle ring, a front plate and a back fin.
+- **Bust:** the Mode 4 bust, 290 mm.
 
-| Case | Turn direction found | Diagonal angles found (true) | Mean error: missed / extra | True surface missing (> 1 voxel) | Closed |
+| Case | Turn direction | Diagonal angles found (true) | Kettle: missed / extra, mean | Bust: missed / extra, mean | True surface missing (> 1 voxel): kettle / bust |
 |---|---|---|---|---|---|
-| 4 views | correct | n/a | 13 / 49 mm | 3.7 % | yes |
-| 4 views, LEFT/RIGHT swapped | **fixed automatically** | n/a | 13 / 49 mm | 3.8 % | yes |
-| 4 views, safe (`--round off --pairs strict`) | correct | n/a | 20 / 63 mm | **0.5 %** | yes |
-| 8 views, exact | correct | 45 / 135 kept (45 / 135) | 16 / 29 mm | 1.3 % | yes |
-| 8 views, diagonals 7° off, black background | correct | 35 / 135.5 (38 / 142) | 15 / 35 mm | 1.7 % | yes |
+| 4 views | correct | n/a | 18 / 55 mm | 4.8 / 6.3 mm | 0.6 % / 0.7 % |
+| 4 views, LEFT/RIGHT swapped | **fixed automatically** | n/a | 18 / 55 mm | 4.8 / 6.2 mm | 0.6 % / 0.6 % |
+| 4 views, `--round off --pairs strict` | correct | n/a | 20 / 63 mm | 5.8 / 9.8 mm | 0.5 % / 0.4 % |
+| 8 views, exact | correct | kettle 45 / 135 (45 / 135); bust 45.5 / 135 | 16 / 29 mm | 5.5 / 7.1 mm | 1.3 % / 0.4 % |
+| 8 views, diagonals 7° off, black background | correct | kettle 35 / 135.5; bust 45 / 135 (true 38 / 142) | 15 / 35 mm | 5.3 / 7.1 mm | 1.7 % / 0.4 % |
+| 8 views + `--sections smooth` (bust) | correct | 45.5 / 135 | n/a | **4.0 / 4.8 mm** | n/a / 2.2 % |
 
 How to read the table:
 - **Missed** = how far the true surface lies from the model.
 - **Extra** = material the hull fills in: concave parts that no outline shows.
 - Every result is a closed mesh. The handle hole stays open.
-- With only outlines, a diagonal angle can be off by a few degrees with no visible change. When that happens, the tool keeps the drawn angle, and it grows any outline it is unsure of so that view cannot cut real material.
+- **Missing** = true material the model cut away. The defaults keep it under 2 %.
+  - Rounder settings get closer on average but cut more: `--round 2.5` reached 3 / 4 mm on the bust, but cut 10 % of its surface.
+  - With only outlines, a diagonal angle can be off by a few degrees with no visible change. When that happens, the tool keeps the drawn angle, and it grows any outline it is unsure of so that view cannot cut real material.
 
 **On your two sheets:**
 
 | Sheet | Result |
 |---|---|
-| 4-view bust (2×2, with grid lines) | 17 s. Closed, 290 mm, 7.8 L. Outline match 94–98 %. Mean distance from the Mode 4 bust (the face-tuned pipeline): **4.9 mm**. See `views_to_3d/example_4view_check.jpg`. |
+| 4-view bust (2×2, with grid lines) | 21 s. Closed, 290 mm, 8.5 L. Outline match 94–98 %. Mean distance from the Mode 4 bust (the face-tuned pipeline): **6.5 mm**. See `views_to_3d/example_4view_check.jpg`. |
 | 8-view bust (2×4, views almost touching) | 66 s. Closed, 7.2 L. The diagonal views were found at **35° and 128°**, not the 45 / 135° they were drawn as. The direction was found from colour. See `views_to_3d/example_8view_check.jpg`. |
 
 A 4-view hull is a rough form: a nose or a brow becomes a band across the face. Use it as the CNC roughing shape and carve the details. For faces, Mode 4 (face-specific) stays better.

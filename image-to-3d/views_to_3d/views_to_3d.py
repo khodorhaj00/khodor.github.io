@@ -359,6 +359,60 @@ def round_cells(vol, n_exp):
     return out
 
 
+def smooth_sections(vol, angles, X, Y, convex_min=0.95, n_dense=180):
+    """3+ view directions: every hull slice is a polygon whose edges come from the
+    outlines. For each nearly convex piece, replace it by the smooth convex shape whose
+    support function is a periodic spline through the polygon's support at the view
+    normals. It touches every outline line, but cuts the polygon's corners."""
+    from scipy.interpolate import CubicSpline
+    g = X[0, 1] - X[0, 0]
+    phis = sorted(set(round((-a) % 360.0, 6) for a in angles) | set(round((180.0 - a) % 360.0, 6) for a in angles))
+    phis = np.radians(np.array(phis))
+    if len(phis) < 6:
+        return vol
+    dense = np.linspace(0, 2 * np.pi, n_dense, endpoint=False)
+    nd = np.stack([np.cos(dense), np.sin(dense)], 1)
+    out = vol.copy()
+    for i in range(vol.shape[0]):
+        sl = vol[i]
+        inside = sl < 0
+        if not inside.any():
+            continue
+        lab, nl = ndi.label(inside)
+        for ci, box in enumerate(ndi.find_objects(lab)):
+            if box is None:
+                continue
+            ys, xs = box
+            y0, y1 = max(0, ys.start - 1), min(sl.shape[0], ys.stop + 1)
+            x0, x1 = max(0, xs.start - 1), min(sl.shape[1], xs.stop + 1)
+            comp = lab[y0:y1, x0:x1] == ci + 1
+            if comp.sum() < 30:
+                continue
+            field = np.where(comp, sl[y0:y1, x0:x1], np.maximum(sl[y0:y1, x0:x1], 0.5))
+            cs = measure.find_contours(field, 0.0)
+            if not cs:
+                continue
+            pts = np.concatenate(cs)                                   # (row, col) in the window
+            P = np.stack([X[0, 0] + (pts[:, 1] + x0) * g, Y[0, 0] + (pts[:, 0] + y0) * g], 1)
+            try:
+                from scipy.spatial import ConvexHull
+                hull_area = ConvexHull(P).volume
+            except Exception:
+                continue
+            if comp.sum() * g * g < convex_min * hull_area:
+                continue                                               # concave piece: keep it
+            h = np.array([(P @ np.array([np.cos(t), np.sin(t)])).max() for t in phis])
+            tt = np.concatenate([phis, [phis[0] + 2 * np.pi]])
+            hh = np.concatenate([h, [h[0]]])
+            hs = CubicSpline(tt, hh, bc_type="periodic")(np.where(dense < phis[0], dense + 2 * np.pi, dense))
+            yy, xx = np.mgrid[y0:y1, x0:x1]
+            Q = np.stack([X[0, 0] + xx.ravel() * g, Y[0, 0] + yy.ravel() * g], 1)
+            f = (Q @ nd.T - hs[None]).max(1).reshape(comp.shape)
+            blk = out[i, y0:y1, x0:x1]
+            blk[comp] = np.maximum(blk[comp], f[comp])
+    return out
+
+
 def directions(angles):
     """Number of distinct view directions (a view and its mirror view count once)."""
     return len(set(int(round(a % 180.0)) % 180 for a in angles))
@@ -439,7 +493,10 @@ def calibrate(V, angles, refine, Hc, Wc, log):
     X, Y, _ = grid_xy(96, 0.5 * m_lr[0].shape[1])
     c_lr = lambda cs: [c * f for c in cs]
     ang = list(angles)
-    free = [k for k in range(n) if (refine == "all" and k > 0) or (refine == "oblique" and not nominal(angles[k]))]
+    # views to solve: their centre is always unknown (the axis is not the outline's middle);
+    # with refine "none" the drawn angle is kept and only the centre is searched
+    free = [k for k in range(n) if (refine == "all" and k > 0) or (refine != "all" and not nominal(angles[k]))]
+    a_coarse = np.arange(-25.0, 25.01, 2.5) if refine != "none" else np.array([0.0])
     groups, seen = [], set()
     for k in free:
         if k in seen:
@@ -487,8 +544,9 @@ def calibrate(V, angles, refine, Hc, Wc, log):
     for grp in groups:
         k, j, _S = grp
         c_ref = centres[k]
-        da, c, lo, hi, _sc = scan(grp, np.arange(-25.0, 25.01, 2.5), c_ref + np.arange(-0.12, 0.1201, 0.02) * Wc)
-        fine_a = np.arange(max(-25.0, lo - 2.5), min(25.0, hi + 2.5) + 0.01, 1.0)
+        da, c, lo, hi, _sc = scan(grp, a_coarse, c_ref + np.arange(-0.12, 0.1201, 0.02) * Wc)
+        fine_a = (np.arange(max(-25.0, lo - 2.5), min(25.0, hi + 2.5) + 0.01, 1.0)
+                  if refine != "none" else np.array([0.0]))
         da, c, lo, hi, sc = scan(grp, fine_a, c + np.arange(-0.03, 0.0301, 0.005) * Wc)
         # last pass: the centre alone, fine steps. Outlines fit equally well over a band of
         # centres; take its middle, and keep its half width as this view's uncertainty
@@ -696,13 +754,17 @@ def main(argv=None):
     ap.add_argument("--order", default="auto", choices=["auto", "as-is", "reverse"],
                     help="turn direction; auto = colour agreement test")
     ap.add_argument("--refine", default="oblique", choices=["none", "oblique", "all"],
-                    help="refine view angles by outline consistency")
+                    help="refine view angles by outline consistency (none = keep drawn angles; "
+                         "centres are always solved)")
     ap.add_argument("--height-mm", type=float, default=1000.0, help="real height of the object")
     ap.add_argument("--res", type=int, default=256, help="voxels over the height")
     ap.add_argument("--pairs", default="mean", choices=["mean", "strict"],
                     help="a view and its mirror view: average their outlines (mean) or cut by both")
     ap.add_argument("--round", default="auto",
-                    help="superellipse exponent for 2-direction sheets (4 views): auto = 2.5, off, or a number")
+                    help="superellipse exponent for 2-direction sheets (4 views): auto = 4, off, or a number "
+                         "(2.5 = closest shape, but shaves ~10%% of the surface)")
+    ap.add_argument("--sections", default="polygon", choices=["polygon", "smooth"],
+                    help="3+ view directions: keep the hull's polygon slices, or smooth convex ones")
     ap.add_argument("--soft", default="0",
                     help="round the edges between hull facets, px at --res (0 = off; tests: off is more accurate)")
     ap.add_argument("--tolerance", type=int, default=0,
@@ -742,7 +804,7 @@ def main(argv=None):
     tol_views = max(0, a.tolerance)
     pair_mean = a.pairs == "mean"
     if a.round == "auto":
-        round_n = 2.5 if directions(angles) <= 2 else 0.0
+        round_n = 4.0 if directions(angles) <= 2 else 0.0
     elif a.round == "off":
         round_n = 0.0
     else:
@@ -783,7 +845,11 @@ def main(argv=None):
     def build(ang_, cen_, rows_, X_, Y_):
         vol_ = hull_volume(sdfs, ang_, cen_, rows_, X_, Y_, tol_views, pair_mean=pair_mean, soft=soft_px,
                            grow=slack)
-        return round_cells(vol_, round_n) if round_n else vol_
+        if round_n:
+            return round_cells(vol_, round_n)
+        if a.sections == "smooth" and directions(ang_) >= 3:
+            return smooth_sections(vol_, ang_, X_, Y_)
+        return vol_
 
     if len(hyps) > 1:
         rows_l = np.arange(0, Hc, 2)
