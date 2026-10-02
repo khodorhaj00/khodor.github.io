@@ -12,6 +12,7 @@
 | `bust4v_compare.jpg` | Your 4 views next to Cycles renders of exactly what Mode 4 builds, same cameras |
 | `bust4v_views.jpg` | Mode 4 bust in perspective: front, 3/4, profile, back 3/4 |
 | `pipeline/multiview/` | Code that turned the 4 views into the Mode 4 data (`pipeline/` = the older one-photo version) |
+| `points8_cloud.jpg`, `points8_compare.jpg`, `pipeline/multiview8/` | 8-view experiment: 50k measured 3D points + triangulated face → surface. Shape is right from every side, but the surface is rougher than Mode 4 (small, flat-lit sheet) |
 | `TOOLKIT.md` | This file: every tool, ranked, with install commands |
 
 ---
