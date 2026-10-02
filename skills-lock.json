@@ -1,11 +1,29 @@
 {
   "version": 1,
   "skills": {
+    "dfam-check": {
+      "source": "earthtojake/text-to-cad",
+      "sourceType": "github",
+      "skillPath": "skills/dfam-check/SKILL.md",
+      "computedHash": "cfa29010d61fa99f5fcf202775df3902cbd9feaa306eb20e73f16f2647e635ae"
+    },
+    "dfm": {
+      "source": "earthtojake/text-to-cad",
+      "sourceType": "github",
+      "skillPath": "skills/dfm/SKILL.md",
+      "computedHash": "caf0960294c32dc8c31a590ab09cca6e508441f80026f30679db41773ccd8dd0"
+    },
     "find-skills": {
       "source": "vercel-labs/skills",
       "sourceType": "github",
       "skillPath": "skills/find-skills/SKILL.md",
       "computedHash": "913b9d37d0d54047dd65222bb8c67b2bf04e3cb87dcad1729068d7a8b2c8c396"
+    },
+    "rhino3d-scripts": {
+      "source": "github/awesome-copilot",
+      "sourceType": "github",
+      "skillPath": "skills/rhino3d-scripts/SKILL.md",
+      "computedHash": "3d13fb8036f95d61df1e1e758e1c33493b519b36ccca580bcd000212b6de382f"
     }
   }
 }

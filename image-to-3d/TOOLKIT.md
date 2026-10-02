@@ -1,6 +1,6 @@
 # Image → clean 3D → clean render → CNC: toolkit
 
-*Checked 1 Oct 2026 for Styro3D. Ranked picks come first. **(U)** = unverified (search snippet only).*
+*Checked 1 Oct 2026 for Styro3D; universal tools added 2 Oct 2026. Ranked picks come first. **(U)** = unverified (search snippet only).*
 
 **Best Gemini model for this:** Nano Banana Pro (Gemini 3 Pro Image). Use it to turn one photo into matching front / side / back views.
 
@@ -8,12 +8,97 @@
 
 | File | What it is |
 |---|---|
+| **`styro3d_cnc.py`** | **Universal** Rhino 7 / 8 script (v1.0): any mesh, solid or SubD → clean → best tool axis → CNC checks → closed foam-block pieces, one STL each + job table. See section 0. |
+| **`views_to_3d/`** | **Universal** views sheet (4, 8 or any number of views) → closed STL in mm, any object, no AI 3D generator. See section 0. `example_4view_check.jpg` / `example_8view_check.jpg` show it on your two bust sheets. |
+| `tests/test_styro3d_cnc.py` | Offline tests for `styro3d_cnc.py`: the pure maths, plus the checks re-run on known shapes |
 | `styro3d_ai_to_cnc.py` | Rhino 7 / 8 script (v1.2). Mode 1: AI mesh → clean → CNC. Mode 2: build the legionary from code. Mode 3: build it, then run the CNC steps. **Mode 4: the marble bust rebuilt from your 4-view sheet. Mode 5: bust → CNC.** |
 | `bust4v_compare.jpg` | Your 4 views next to Cycles renders of exactly what Mode 4 builds, same cameras |
 | `bust4v_views.jpg` | Mode 4 bust in perspective: front, 3/4, profile, back 3/4 |
 | `pipeline/multiview/` | Code that turned the 4 views into the Mode 4 data (`pipeline/` = the older one-photo version) |
 | `points8_cloud.jpg`, `points8_compare.jpg`, `pipeline/multiview8/` | 8-view experiment: 50k measured 3D points + triangulated face → surface. Shape is right from every side, but the surface is rougher than Mode 4 (small, flat-lit sheet) |
 | `TOOLKIT.md` | This file: every tool, ranked, with install commands |
+
+---
+
+## 0. Universal tools (start here)
+
+Two tools, nothing in them is specific to one model:
+
+```
+views sheet (4 / 8 views) --views_to_3d.py--> closed STL --styro3d_cnc.py (Rhino)--> block STLs + job table --> CAM
+any mesh / STEP / SubD -----------------------------------^
+```
+
+### A. `styro3d_cnc.py`: any part → CNC (Rhino 7 / 8)
+
+**Run:** `_RunPythonScript` → pick the file → edit the settings → select the part. You can also press Enter to import OBJ / STL / FBX / PLY / 3MF / STEP / IGES; GLB needs Rhino 8. Your values are remembered for the next run.
+
+| Step | What it does |
+|---|---|
+| 1 Clean | Welds seams, drops floaters and inner shells, heals and fills holes, fixes normals. On Rhino 8 it ShrinkWraps if the part is still open. |
+| 2 Size | Scales to a target height, **or** fits the part into N × N × N foam blocks (`fit = 1x1x2`). |
+| 3 Tool axis | Tests 9 axes and keeps the one with the **least undercut area**; on a tie it keeps the shallower one. Then it turns the part about that axis so it needs the **fewest blocks**. The report prints a table of all 9 axes. |
+| 4 Checks | **Thin walls** (red). **Ball-nose reach** (orange): inside corners and slots tighter than the tool radius, which come out rounded. **Undercut** for 2 setups (top + flip) or 4 setups (+ both long sides), shown as magenta faces. **Deepest cut per setup** against the tool's stick-out. Volume, EPS weight and material yield. |
+| 5 Blocks | Cuts the part into **closed pieces, one per foam block**. Ring-shaped cuts, such as a flat letter O, are capped correctly. Each piece gets: its own STL in block coordinates (origin = block corner, Z = tool axis); a label; an exploded view; and one row in `*_blocks.csv` with trimmed stock size, volume, weight, undercut %, depth per setup and tool OK / TOO DEEP. |
+| 6 Output | Whole-part STL in mm, PNG previews, `report.txt`. QuadRemesh / SubD are optional. |
+
+**Checks done:**
+- Every RhinoCommon call was checked against the Rhino 7.38 and 8.35 SDKs.
+- The code parses as Python 2.7 and is ASCII only.
+- Offline tests pass for all the pure maths.
+- **Method tests on known shapes** (re-run in trimesh):
+  - C-channel: the undercut along Y is 0 % against 37 % along Z, and the script picks Y.
+  - L-block with an R6 ball: only the points within 5 mm of the inside corner are flagged.
+  - R600 sphere in 1000 mm blocks: 2 × 2 × 2 = 8 pieces, volume kept exactly.
+  - Flat ring section: read as outer loop + hole.
+
+It has **not been run inside Rhino** yet. If it errors, paste the command-line text back.
+
+The old `styro3d_ai_to_cnc.py` stays as it was (legionary and bust modes).
+
+### B. `views_to_3d/`: views sheet → closed STL (any object)
+
+```
+python views_to_3d/views_to_3d.py sheet.png --views 4 --height-mm 1800
+python views_to_3d/views_to_3d.py sheet8.png --views 8 --height-mm 600
+```
+
+Everything is automatic:
+1. Split the sheet; grid lines and text labels are removed.
+2. Scale every view to the same height.
+3. Centre mirror pairs.
+4. Refine the diagonal-view angles.
+5. Check the turn direction (left/right labels swapped?).
+6. Build the visual hull. 4-view sheets get rounded cross-sections.
+7. Marching cubes → closed STL.
+8. Make a check sheet.
+
+Full details and the prompt for a good sheet are in [`views_to_3d/README.md`](views_to_3d/README.md).
+
+**Test on a shape with a known truth** (`views_to_3d/selftest.py`): an asymmetric 790 mm "kettle" with a spout, a handle ring, a front plate and a back fin, rendered as sheets.
+
+| Case | Turn direction found | Diagonal angles found (true) | Mean error: missed / extra | True surface missing (> 1 voxel) | Closed |
+|---|---|---|---|---|---|
+| 4 views | correct | n/a | 13 / 49 mm | 3.7 % | yes |
+| 4 views, LEFT/RIGHT swapped | **fixed automatically** | n/a | 13 / 49 mm | 3.8 % | yes |
+| 4 views, safe (`--round off --pairs strict`) | correct | n/a | 20 / 63 mm | **0.5 %** | yes |
+| 8 views, exact | correct | 45 / 135 kept (45 / 135) | 16 / 29 mm | 1.3 % | yes |
+| 8 views, diagonals 7° off, black background | correct | 35 / 135.5 (38 / 142) | 15 / 35 mm | 1.7 % | yes |
+
+How to read the table:
+- **Missed** = how far the true surface lies from the model.
+- **Extra** = material the hull fills in: concave parts that no outline shows.
+- Every result is a closed mesh. The handle hole stays open.
+- With only outlines, a diagonal angle can be off by a few degrees with no visible change. When that happens, the tool keeps the drawn angle, and it grows any outline it is unsure of so that view cannot cut real material.
+
+**On your two sheets:**
+
+| Sheet | Result |
+|---|---|
+| 4-view bust (2×2, with grid lines) | 17 s. Closed, 290 mm, 7.8 L. Outline match 94–98 %. Mean distance from the Mode 4 bust (the face-tuned pipeline): **4.9 mm**. See `views_to_3d/example_4view_check.jpg`. |
+| 8-view bust (2×4, views almost touching) | 66 s. Closed, 7.2 L. The diagonal views were found at **35° and 128°**, not the 45 / 135° they were drawn as. The direction was found from colour. See `views_to_3d/example_8view_check.jpg`. |
+
+A 4-view hull is a rough form: a nose or a brow becomes a band across the face. Use it as the CNC roughing shape and carve the details. For faces, Mode 4 (face-specific) stays better.
 
 ---
 
@@ -52,7 +137,7 @@
 | 4 Retopo | Hard parts auto, face / hands manual | **Quad Remesher** + **RetopoFlow 4** (Rhino QuadRemesh, ZRemesher, 3DCoat AutoPo, Instant Meshes free) |
 | 5 UV / bake / paint | UV → bake high → low → paint | RizomUV / UVPackmaster 4 → **Marmoset 5** bake → **Substance Painter 12.1**; CC0 materials from Poly Haven / ambientCG |
 | 6 Render | Studio HDRI + key / rim light, 85 mm lens, dark backdrop. Deliver beauty + clay + wireframe + turntable. | **Blender 5.2 LTS Cycles**, AgX (hero) or Khronos PBR Neutral (true colour), OIDN denoise |
-| 7 CNC | Start from the dense mesh, not the quad mesh: watertight, scale, checks, blocks, STL | **`styro3d_ai_to_cnc.py` Mode 1** + Rhino 8 ShrinkWrap → RhinoCAM / Carveco / your ArtCAM / RoboDK |
+| 7 CNC | Start from the dense mesh, not the quad mesh: watertight, scale, checks, blocks, STL | **`styro3d_cnc.py`** (universal: tool axis, ball reach, block pieces + job table) + Rhino 8 ShrinkWrap → RhinoCAM / Carveco / your ArtCAM / RoboDK |
 
 AI textures have lighting baked in, so use them only as a base layer.
 
@@ -161,6 +246,22 @@ The session container itself also runs Blender as a Python module (`pip install 
 | 6 | **earthtojake/text-to-cad** (16.5k★, MIT) | build123d CAD, DFM review for CNC, DXF, STEP / STL, engineering drawings | `npx skills add earthtojake/text-to-cad` |
 | 7 | **cloudai-x/threejs-skills** (3.4k★) | Show GLB models on your website (khodor.github.io) in a 3D viewer | `npx skills add cloudai-x/threejs-skills` |
 
+**Installed in this repo now** (`.claude/skills/`, pinned in `skills-lock.json`). I read each one before installing. They are plain instructions plus local Python scripts, with no network or shell calls (checked).
+
+| Skill | Source | Use here |
+|---|---|---|
+| `find-skills` | vercel-labs/skills | Find more skills: `npx skills find <topic>` |
+| `rhino3d-scripts` | github/awesome-copilot | RhinoCommon / RhinoPython rules for Rhino 7 + 8. Used to write `styro3d_cnc.py`. |
+| `dfm` | earthtojake/text-to-cad (MIT) | CNC design review rules: inside corner radius vs cutter radius, reach, setups, undercuts. These became the ball-reach, depth and setup checks. |
+| `dfam-check` | earthtojake/text-to-cad (MIT) | Mesh checks in Python (wall thickness, overhangs, orientation) for STL files outside Rhino. Needs `trimesh numpy rtree scipy networkx lxml`. |
+
+**Checked this time and skipped:**
+- `npx autoskills`: it only suggested web front-end skills for this website repo.
+- CLI-Anything Blender: it needs an extra pip package I could not review.
+- text-to-cad `cad` / `dxf`: their CAD generator is not needed for foam work.
+
+Note: skills.sh search is blocked from this cloud session, so I searched GitHub directly.
+
 Others I looked at:
 - **Also OK:** `sfkislev/flue` Blender bridge (2.3k installs, Win/macOS: `pip install flue && flue setup`), `HKUDS/CLI-Anything` Blender CLI (51k★, check its README for the install).
 - **Skip:**
@@ -236,11 +337,13 @@ No generator does armour + a human body cleanly in one pass, so split the parts 
 | Robot milling | **RoboDK** ($3,995 + $1,500/yr maintenance), KUKA\|prc (free community version / €450 a year) |
 | Hot-wire | Roughing only (ruled surfaces): WiHoWi (free 4-axis), your Croma Foam workflow |
 
-**The 4 checks before cutting** (Mode 1 reports all 4):
+**The checks before cutting.** `styro3d_cnc.py` reports all of them; Mode 1 of the old script reports 1–4:
 1. Watertight.
 2. Thinnest wall vs foam strength.
 3. Undercut % for 2-sided 3-axis machining, to decide between robot, more setups or split lines.
 4. Block grid, glue lines and weight.
+5. Ball-nose reach: inside corners and slots tighter than the tool radius.
+6. Deepest cut per setup against the tool's stick-out, block by block (`*_blocks.csv`).
 
 ---
 
@@ -266,6 +369,10 @@ No generator does armour + a human body cleanly in one pass, so split the parts 
 
 ## 12. Next step: pick one
 
+0. **Universal route (new):**
+   - Make a 4- or 8-view sheet with the prompt in `views_to_3d/README.md`.
+   - Run `views_to_3d.py`.
+   - Run `styro3d_cnc.py` in Rhino on the STL. You get block STLs and a job table.
 1. **Cloud run now:** your image → Nano Banana Pro views → Tripo H3.1 multiview (quads) → Blender 5.2 render → OBJ for the Rhino script. Costs Higgsfield credits.
 2. **Local run:** download a mesh from Meshy / Tripo / Hunyuan and run **Mode 1** in Rhino.
 3. **Set up your PC:** I add `.mcp.json` + the skills above to a repo of your choice.
