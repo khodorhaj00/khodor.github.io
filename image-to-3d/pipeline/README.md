@@ -1,7 +1,10 @@
 # Photo → 3D bust pipeline (research code behind Mode 4)
 
+> **Mode 4 data now comes from the 4-view pipeline in [`multiview/`](multiview/README.md) (script v1.2).**
+> This folder is the older one-photo version (v1.1). Use it when you only have a single photo.
+
 This rebuilds a statue / bust from **one photo** without any AI 3D generator, then packs the result into
-`../styro3d_ai_to_cnc.py` (Mode 4). It is the exact code used for the bearded Roman bust.
+`../styro3d_ai_to_cnc.py` (Mode 4). It is the exact code used for the v1.1 bearded Roman bust.
 
 **Needs**:
 - Python 3.11 with `numpy scipy opencv-python-headless mediapipe jax trimesh pillow`.
