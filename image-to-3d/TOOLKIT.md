@@ -8,7 +8,8 @@
 
 | File | What it is |
 |---|---|
-| `styro3d_ai_to_cnc.py` | Rhino 7 / 8 script. Mode 1: AI mesh → clean → CNC. Mode 2: build the legionary from code. Mode 3: build it, then run the CNC steps. |
+| `styro3d_ai_to_cnc.py` | Rhino 7 / 8 script. Mode 1: AI mesh → clean → CNC. Mode 2: build the legionary from code. Mode 3: build it, then run the CNC steps. **Mode 4: the marble bust rebuilt from your photo. Mode 5: bust → CNC.** |
+| `bust_compare.jpg`, `bust_views.jpg` | Cycles renders of exactly what Mode 4 builds |
 | `TOOLKIT.md` | This file: every tool, ranked, with install commands |
 
 ---
@@ -91,6 +92,30 @@ The session container itself also runs Blender as a Python module (`pip install 
 - `04` / `05` are the checks.
 - `06` is the foam blocks.
 - `S3D_Legionary::*` holds the built figure, one layer per material.
+
+### Mode 4 / 5: Roman marble bust from your photo (v1.1)
+
+![photo vs model](bust_compare.jpg)
+
+![views](bust_views.jpg)
+
+**What the script builds:** a closed bust of about 800k quads: flat base, chest, neck, head, and a pole at the crown. It is a single watertight solid at life size (292 mm tall, 6.5 L), and you can scale it to any height. It gets a marble PBR material and an optional round socle. Mode 5 then runs the CNC checks and exports STL.
+
+**How it was made from one photo, with no AI 3D generator:**
+1. Cut the bust out of the photo and find 478 face points (MediaPipe). This gives the head turn: 22° yaw and 9° tilt.
+2. Fit a skull, jaw/beard, neck, ear and torso template to the silhouette, at real scale from the face model.
+3. Run a linear shape-from-shading solve using the light direction found from the silhouette rim. It recovers eyes, brow, nose, lips, beard and hair locks, ear folds and drapery.
+4. Build the closed 3D surface:
+   - Front: measured from the photo.
+   - Shadowed far side: mirrored from the near side.
+   - Hidden back: the smooth template, with hair texture copied from the visible hair.
+   - Every point is clipped to the photo's silhouette.
+5. Store the shape as a radius map (565 KB of text at the end of the `.py`). Rebuild error is 0.09 mm max.
+
+**Limits:**
+- The front matches the photo.
+- The back and the far ear are a plausible estimate, because the photo cannot show them.
+- A trained 3D generator (Tripo/Hunyuan) invents the back with more detail. For an exact 360° match, generate that mesh and use **Mode 1**.
 
 **Mode 2 output** (offline layout check built from the same numbers; Rhino shows it smoother, with PBR materials):
 
