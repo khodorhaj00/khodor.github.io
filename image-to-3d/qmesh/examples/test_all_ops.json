@@ -1,0 +1,20 @@
+{
+  "format": "s3d-qmesh/1",
+  "name": "test_all_ops",
+  "units": "mm",
+  "parts": [
+    {"name": "plinth", "op": "box", "size": [400, 300, 60], "segments": [8, 6, 2], "at": [0, 0, 30]},
+    {"name": "column", "op": "revolve", "segments": 32,
+     "profile": [[0, 60], [90, 60], [90, 80], [70, 100], [60, 400], [80, 430], [80, 450], [0, 450]]},
+    {"name": "ball", "op": "sphere", "r": 70, "segments": 8, "at": [0, 0, 520]},
+    {"name": "ring", "op": "torus", "R": 120, "r": 15, "at": [0, 0, 250]},
+    {"name": "handle", "op": "sweep", "profile": {"shape": "circle", "r": 12, "segments": 16},
+     "path": [[150, 0, 100], [200, 0, 200], [200, 0, 300], [150, 0, 380]]},
+    {"name": "plate", "op": "extrude", "plane": "XZ", "height": 20,
+     "outer": [[-180, 100], [-120, 100], [-120, 300], [-180, 300]],
+     "holes": [[[-160, 180], [-140, 180], [-140, 220], [-160, 220]]], "move": [0, -150, 0]},
+    {"name": "blob", "op": "loft", "segments": 24, "dome_end": 20,
+     "sections": [{"z": 60, "rx": 40, "ry": 30}, {"z": 120, "rx": 55, "ry": 40}, {"z": 180, "rx": 35, "ry": 30}],
+     "move": [150, 100, 0], "subdivide": 1}
+  ]
+}

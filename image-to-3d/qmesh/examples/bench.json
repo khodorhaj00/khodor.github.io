@@ -1,0 +1,17 @@
+{
+  "format": "s3d-qmesh/1",
+  "name": "bench",
+  "units": "mm",
+  "note": "Hard-surface example written by hand (the way Claude writes recipes from a photo + dimensions): 1600 x 420 x 450 mm park bench, foam CNC.",
+  "parts": [
+    {"name": "seat", "op": "box", "size": [1600, 420, 60], "segments": [32, 8, 2], "at": [0, 0, 420]},
+    {"name": "backrest", "op": "box", "size": [1600, 50, 380], "segments": [32, 1, 8], "at": [0, 190, 640],
+     "rotate": {"axis": [1, 0, 0], "deg": -12, "centre": [0, 190, 450]}},
+    {"name": "leg_front", "op": "cylinder", "r": 35, "h": 390, "segments": 24, "rings": 8, "at": [-700, -150, 0], "mirror": "X"},
+    {"name": "leg_back", "op": "cylinder", "r": 35, "h": 390, "segments": 24, "rings": 8, "at": [-700, 150, 0], "mirror": "X"},
+    {"name": "armrest", "op": "sweep", "profile": {"shape": "superellipse", "rx": 30, "ry": 22, "n": 3, "segments": 16},
+     "path": [[-790, -200, 450], [-790, -120, 560], [-790, 60, 600], [-790, 190, 600]], "mirror": "X"},
+    {"name": "plaque", "op": "extrude", "plane": "XZ", "height": 12, "edge": 15,
+     "outer": [[-200, 360], [200, 360], [200, 400], [-200, 400]], "move": [0, -222, 0]}
+  ]
+}

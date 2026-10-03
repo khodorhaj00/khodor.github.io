@@ -9,8 +9,9 @@
 | File | What it is |
 |---|---|
 | **`styro3d_cnc.py`** | **Universal** Rhino 7 / 8 script (v1.0): any mesh, solid or SubD → clean → best tool axis → CNC checks → closed foam-block pieces, one STL each + job table. See section 0. |
+| **`qmesh/`** | **Universal, clean topology.** Photo / views sheet / photo + real size → **closed quad meshes** (OBJ with quads, STL). Even rings, no poles. The same kernel runs in a cloud chat and in Rhino; the Rhino script adds SubD → NURBS polysurface. Claude skill: `.claude/skills/image-to-qmesh`. See section 0. |
 | **`views_to_3d/`** | **Universal** views sheet (4, 8 or any number of views) → closed STL in mm, any object, no AI 3D generator. See section 0. `example_4view_check.jpg` / `example_8view_check.jpg` show it on your two bust sheets. |
-| `tests/test_styro3d_cnc.py` | Offline tests for `styro3d_cnc.py`: the pure maths, plus the checks re-run on known shapes |
+| `tests/test_styro3d_cnc.py`, `tests/test_qmesh.py` | Offline tests for `styro3d_cnc.py` (pure maths plus the checks on known shapes) and for `qmesh` (kernel, recipes, the 3 image routes, the Rhino script) |
 | `styro3d_ai_to_cnc.py` | Rhino 7 / 8 script (v1.2). Mode 1: AI mesh → clean → CNC. Mode 2: build the legionary from code. Mode 3: build it, then run the CNC steps. **Mode 4: the marble bust rebuilt from your 4-view sheet. Mode 5: bust → CNC.** |
 | `bust4v_compare.jpg` | Your 4 views next to Cycles renders of exactly what Mode 4 builds, same cameras |
 | `bust4v_views.jpg` | Mode 4 bust in perspective: front, 3/4, profile, back 3/4 |
@@ -22,12 +23,24 @@
 
 ## 0. Universal tools (start here)
 
-Two tools, nothing in them is specific to one model:
+Three tools, nothing in them is specific to one model:
 
 ```
+photo / sheet + real size --qmesh--> clean closed QUAD mesh (OBJ) --Rhino--> SubD --> NURBS polysurface
 views sheet (4 / 8 views) --views_to_3d.py--> closed STL --styro3d_cnc.py (Rhino)--> block STLs + job table --> CAM
 any mesh / STEP / SubD -----------------------------------^
 ```
+
+### C. `qmesh/`: image → clean closed quad mesh (topology first)
+
+| Object | Route |
+|---|---|
+| Letters, logos, signs | `sign` → extrude. Quad walls; caps are a quad grid plus a thin band. |
+| Vases, columns, turned parts | `revolve` → quad rings, no poles |
+| Busts, figures, animals (2 / 4 / 8 views) | `views` → visual hull → ring sections → quad lofts. Arms and legs become separate lofts. |
+| Furniture, machines, props | A recipe Claude writes from the photo + dimensions: boxes, cylinders, sweeps, extrusions |
+
+Every part is checked: closed, manifold, oriented, one shell, quads %, evenness. In Rhino, `s3d_qmesh_rhino.py` builds the same recipe and can add a SubD and a NURBS polysurface. Details and test results are in [`qmesh/README.md`](qmesh/README.md).
 
 ### A. `styro3d_cnc.py`: any part → CNC (Rhino 7 / 8)
 
@@ -250,6 +263,7 @@ The session container itself also runs Blender as a Python module (`pip install 
 | 5 | **majidmanzarpour/blender-game-skills · blender-image-to-3d** (120★) | Image-to-3D loop that checks renders from a camera matched to the reference | `npx skills add majidmanzarpour/blender-game-skills --skill blender-image-to-3d -g -a claude-code` |
 | 6 | **earthtojake/text-to-cad** (16.5k★, MIT) | build123d CAD, DFM review for CNC, DXF, STEP / STL, engineering drawings | `npx skills add earthtojake/text-to-cad` |
 | 7 | **cloudai-x/threejs-skills** (3.4k★) | Show GLB models on your website (khodor.github.io) in a 3D viewer | `npx skills add cloudai-x/threejs-skills` |
+| — | **hoainho/img2threejs** (Apache-2.0) and **matthew-kissinger/kiln** (MIT), both checked 3 Oct 2026 | Agents write procedural Three.js / JS meshes for web and games, with review sheets and structural checks. Neither makes NURBS solids or CNC files. Their staged review loop and measured checks were reused in `image-to-qmesh`. | not installed |
 
 **Installed in this repo now** (`.claude/skills/`, pinned in `skills-lock.json`). I read each one before installing. They are plain instructions plus local Python scripts, with no network or shell calls (checked).
 
