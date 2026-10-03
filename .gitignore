@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+fal_key.txt
+*.key

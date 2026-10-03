@@ -364,7 +364,7 @@ def build_payload(preset, photos, extra=None):
     multi = len(photos) > 1
     app = preset.get("app_multi") if (multi and preset.get("app_multi")) else preset["app"]
     body = {}
-    list_field = preset.get("list_field_multi") if multi else None
+    list_field = preset.get("list_field_multi") if multi else preset.get("list_single")
     if list_field:
         body[list_field] = [photos[v] for v in VIEWS if v in photos]
     else:
@@ -441,6 +441,49 @@ def status_urls(app, submit):
     return (submit.get("status_url") or base + "/status", submit.get("response_url") or base, rid)
 
 
+def fal_missing_fields(err_text):
+    """Field names a fal 422 reply says are missing: {"detail": [{"loc": ["body", "image_url"], ...}]}."""
+    i, j = err_text.find("{"), err_text.rfind("}")
+    if i < 0 or j < i:
+        return []
+    try:
+        js = json.loads(err_text[i:j + 1])
+    except ValueError:
+        return []
+    out = []
+    for d in (js.get("detail") or []) if isinstance(js, dict) else []:
+        if not isinstance(d, dict):
+            continue
+        loc, kind, msg = d.get("loc") or [], str(d.get("type", "")), str(d.get("msg", "")).lower()
+        if loc and ("missing" in kind or "required" in msg):
+            out.append(str(loc[-1]))
+    return out
+
+
+def retry_preset(preset, err_text, photos):
+    """After a 422 (rejected before any work, so nothing is charged): send the photo under the
+    image field fal asked for and drop the optional extras. None = nothing to retry."""
+    if "422" not in err_text and "Unprocessable" not in err_text:
+        return None
+    fixed = dict(preset)
+    fixed["extra"] = {}
+    why = ["optional settings dropped"]
+    wanted = [f for f in fal_missing_fields(err_text) if "image" in f.lower()]
+    if wanted and len(photos) == 1:
+        field = wanted[0]
+        fixed.pop("app_multi", None)
+        if field.endswith("s"):                         # e.g. image_urls takes a list
+            fixed["views"] = {}
+            fixed["list_field_multi"] = None
+            fixed["list_single"] = field
+        else:
+            fixed["views"] = {"front": field}
+        why.insert(0, "photo sent as '%s'" % field)
+    elif not preset.get("extra"):
+        return None                                     # nothing left to change
+    return {"preset": fixed, "why": ", ".join(why)}
+
+
 def parse_extra(text):
     text = (text or "").strip()
     if not text:
@@ -509,7 +552,8 @@ def http_json(method, url, key=None, body=None, timeout_s=120):
         resp = ureq.urlopen(req, timeout=timeout_s)
         return json.loads(resp.read().decode("utf-8"))
     except HTTPError as e:
-        raise ApiError("%s %s\n%s\n%s" % (method, url.split("?")[0], e, e.read()[:1500]))
+        raise ApiError("%s %s\n%s\n%s" % (method, url.split("?")[0], e,
+                                          e.read()[:1500].decode("utf-8", "replace")))
 
 
 def http_download(url, path):
@@ -833,7 +877,14 @@ def source_ai(job, log):
         uris[v] = image_data_uri(p, int(ai.num("max_px", 2048)))
         log("Photo %-5s %s (%.0f kB sent)" % (v, os.path.basename(p), len(uris[v]) * 0.75 / 1024))
     log("AI: %s - about 1-3 minutes. Esc stops waiting." % preset.get("note", name))
-    result, rid = fal_generate(preset, uris, key, extra, ai.num("timeout", 15.0), log, ui_wait)
+    try:
+        result, rid = fal_generate(preset, uris, key, extra, ai.num("timeout", 15.0), log, ui_wait)
+    except ApiError as err:
+        fix = retry_preset(preset, str(err), uris)
+        if fix is None:
+            raise
+        log("fal rejected the request (nothing charged). Retrying once: %s" % fix["why"])
+        result, rid = fal_generate(fix["preset"], uris, key, None, ai.num("timeout", 15.0), log, ui_wait)
     with open(os.path.join(folder, "fal_result.json"), "w") as fh:
         json.dump(result, fh, indent=1)
     best = choose_model_url(find_model_urls(result), preset.get("prefer"))

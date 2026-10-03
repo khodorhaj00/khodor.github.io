@@ -283,6 +283,13 @@ class Fal(BaseHTTPRequestHandler):
         STATE["auth"] = self.headers.get("Authorization")
         if self.path.startswith("/bad/"):
             return self._send(422, {"detail": [{"loc": ["body", "image_url"], "msg": "field required"}]})
+        if self.path.startswith("/strict/"):                # wants image_url, forbids extra options
+            errs = [] if "image_url" in STATE["body"] else [
+                {"type": "missing", "loc": ["body", "image_url"], "msg": "Field required"}]
+            errs += [{"type": "extra_forbidden", "loc": ["body", k], "msg": "Extra inputs are not permitted"}
+                     for k in STATE["body"] if k != "image_url"]
+            if errs:
+                return self._send(422, {"detail": errs})
         base = "http://127.0.0.1:%d/fal-ai/hunyuan3d-v3/requests/r123" % PORT
         self._send(200, {"request_id": "r123", "status_url": base + "/status", "response_url": base,
                          "cancel_url": base + "/cancel"})
@@ -325,9 +332,27 @@ try:
     raise AssertionError("422 must raise")
 except R.ApiError as e:
     assert "field required" in str(e) and "image_url" in str(e)
+# a wrong image field + an option the endpoint forbids -> one automatic retry fixes both
+strict = {"app": "strict/model", "views": {"front": "input_image_url"}, "extra": {"enable_geometry": True}}
+try:
+    R.fal_generate(strict, {"front": uri}, "k", None, 1.0, log=lines.append, wait=lambda s: None)
+    raise AssertionError("strict endpoint must reject the first try")
+except R.ApiError as e:
+    assert R.fal_missing_fields(str(e)) == ["image_url"], R.fal_missing_fields(str(e))
+    fix = R.retry_preset(strict, str(e), {"front": uri})
+STATE["polls"] = 0
+result, rid = R.fal_generate(fix["preset"], {"front": uri}, "k", None, 1.0, log=lines.append,
+                             wait=lambda s: None)
+assert STATE["body"] == {"image_url": uri} and rid == "r123" and "image_url" in fix["why"]
+assert R.retry_preset(strict, "GET x\nHTTP Error 500: boom", {"front": uri}) is None
+lst = R.retry_preset({"app": "a/b", "views": {"front": "image"}, "extra": {}},
+                     'POST x\nHTTP Error 422\n{"detail": [{"type": "missing", "loc": ["body", "image_urls"]}]}',
+                     {"front": uri})
+assert R.build_payload(lst["preset"], {"front": uri})[1] == {"image_urls": [uri]}
 srv.shutdown()
 print("4 fal protocol: submit -> IN_QUEUE -> IN_PROGRESS -> COMPLETED -> result -> GLB download; "
-      "key header + data-URI photo sent; 422 shows the server's message")
+      "key header + data-URI photo sent; 422 shows the server's message; a 422 for a wrong image "
+      "field / forbidden option is fixed by one automatic retry")
 
 # ------------------------------------------------------------------ 5 cloud helper: check + prep
 sys.path.insert(0, os.path.join(HERE, "..", "views_to_3d"))
