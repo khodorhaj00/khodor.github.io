@@ -8,10 +8,11 @@
 
 | File | What it is |
 |---|---|
+| **`photo3d/`** | **Fastest: photo(s) → AI 3D → Rhino.** One Rhino 7 / 8 script: AI (fal.ai key) / model link from a Claude chat (Higgsfield) / any GLB-OBJ-FBX-STL file → real size → closed → QuadRemesh → SubD → NURBS polysurface. GLB works in Rhino 7 too. Claude skill: `.claude/skills/photo-to-rhino`. See [`photo3d/README.md`](photo3d/README.md). |
 | **`styro3d_cnc.py`** | **Universal** Rhino 7 / 8 script (v1.0): any mesh, solid or SubD → clean → best tool axis → CNC checks → closed foam-block pieces, one STL each + job table. See section 0. |
 | **`qmesh/`** | **Universal, clean topology.** Photo / views sheet / photo + real size → **closed quad meshes** (OBJ with quads, STL). Even rings, no poles. The same kernel runs in a cloud chat and in Rhino; the Rhino script adds SubD → NURBS polysurface. Claude skill: `.claude/skills/image-to-qmesh`. See section 0. |
 | **`views_to_3d/`** | **Universal** views sheet (4, 8 or any number of views) → closed STL in mm, any object, no AI 3D generator. See section 0. `example_4view_check.jpg` / `example_8view_check.jpg` show it on your two bust sheets. |
-| `tests/test_styro3d_cnc.py`, `tests/test_qmesh.py` | Offline tests for `styro3d_cnc.py` (pure maths plus the checks on known shapes) and for `qmesh` (kernel, recipes, the 3 image routes, the Rhino script) |
+| `tests/test_styro3d_cnc.py`, `tests/test_qmesh.py`, `tests/test_photo3d.py` | Offline tests for `styro3d_cnc.py` (pure maths plus the checks on known shapes) and for `qmesh` (kernel, recipes, the 3 image routes, the Rhino script) |
 | `styro3d_ai_to_cnc.py` | Rhino 7 / 8 script (v1.2). Mode 1: AI mesh → clean → CNC. Mode 2: build the legionary from code. Mode 3: build it, then run the CNC steps. **Mode 4: the marble bust rebuilt from your 4-view sheet. Mode 5: bust → CNC.** |
 | `bust4v_compare.jpg` | Your 4 views next to Cycles renders of exactly what Mode 4 builds, same cameras |
 | `bust4v_views.jpg` | Mode 4 bust in perspective: front, 3/4, profile, back 3/4 |
@@ -22,6 +23,8 @@
 ---
 
 ## 0. Universal tools (start here)
+
+**Fastest (AI, 1–3 min):** photo(s) → AI image-to-3D → `photo3d/s3d_photo_to_rhino.py` → real size, quads, SubD, NURBS. Use it when speed matters more than exact dimensions. Use `qmesh` or `views_to_3d` when the outline must be exact.
 
 Three tools, nothing in them is specific to one model:
 

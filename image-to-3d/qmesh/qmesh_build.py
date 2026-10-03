@@ -56,7 +56,8 @@ def render_views(parts, path, size=420):
     lo, hi = V.min(0), V.max(0)
     c = 0.5 * (lo + hi)
     R = np.linalg.norm(hi - lo) * 0.5 or 1.0
-    views = [("front", 0, 0), ("right", 90, 0), ("back", 180, 0), ("left", 270, 0), ("top", 0, 89.9), ("3/4", 35, 25)]
+    # names = Rhino's named views: az 90 looks from -X (Left), az 270 from +X (Right)
+    views = [("front", 0, 0), ("left", 90, 0), ("back", 180, 0), ("right", 270, 0), ("top", 0, 89.9), ("3/4", 35, 25)]
     tiles = []
     for name, az, el in views:
         a, e = math.radians(az), math.radians(el)
