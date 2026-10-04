@@ -46,6 +46,16 @@ Textures are not needed for Rhino or CNC. Always turn them off: it costs less an
 5. In Rhino: `_RunPythonScript` -> `s3d_photo_to_rhino.py` -> **URL** -> paste the link. Then set the real size and `output nurbs`.
 6. If the container can download the GLB, run `p3d_cloud.py check model.glb --height-mm H` and show the 6-view picture before Rhino. This works only if the environment allows Higgsfield's media host, `d2ol7oe51mr4n9.cloudfront.net`.
 
+## Route A2: in the Claude chat with fal.ai
+
+Use this when the environment allows `queue.fal.run`, `fal.run`, `fal.media`, `v3.fal.media` and `rest.alpha.fal.ai`, and the key is in `FAL_KEY` or `~/.config/styro3d/fal_key.txt`. Never put the key in the repo.
+
+```
+python p3d_cloud.py ai front.png [--back b.png --left l.png --right r.png] --model hunyuan --height-mm 290 --out ai_out/
+```
+
+It sends the photos, waits, downloads the model and runs `check`, which gives the 6-view picture and an OBJ + STL in mm. Send the user the model file. In Rhino they run the script with source **File**.
+
 ## Route B: straight from Rhino (no chat)
 
 Use `s3d_photo_to_rhino.py`, source **AI**, with a fal.ai key. The key is read from the `FAL_KEY` environment variable, or `%APPDATA%\Styro3D\fal_key.txt`, or asked once.

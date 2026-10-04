@@ -5,10 +5,15 @@
   check  a model from any generator (GLB / glTF / OBJ / STL / PLY) -> size, faces,
          closed, loose pieces, a 6-view picture; with --height-mm also a Z-up OBJ + STL
          in real millimetres (the Rhino script does the full clean + quads + SubD)
+  ai     photo(s) -> fal.ai image-to-3D (same presets as the Rhino script) -> model file
+         -> check. Needs the fal hosts allowed in the environment and a key in FAL_KEY or
+         ~/.config/styro3d/fal_key.txt (never in the repo).
 
   python p3d_cloud.py prep photo.jpg --out ai_in/
   python p3d_cloud.py prep sheet.png --sheet 4 --names front,right,back,left --out ai_in/
   python p3d_cloud.py check model.glb --height-mm 1800 --out checked/
+  python p3d_cloud.py ai front.png [--back b.png --left l.png --right r.png] --model hunyuan \
+         --height-mm 290 --out ai_out/
 
 Needs: numpy scipy opencv-python-headless (prep); trimesh only for STL / PLY in check.
 """
@@ -289,6 +294,71 @@ def check(path, out_dir, height_mm=0.0, up="auto", size_axis="height", turn=0.0)
     return info
 
 
+# ----------------------------------------------------------------------------- ai (fal.ai)
+KEY_FILE = os.path.join(os.path.expanduser("~"), ".config", "styro3d", "fal_key.txt")
+
+
+def fal_key():
+    key = (os.environ.get("FAL_KEY") or "").strip()
+    if not key and os.path.isfile(KEY_FILE):
+        key = open(KEY_FILE).read().strip()
+    if not key:
+        raise SystemExit("No fal key: set FAL_KEY or write it to " + KEY_FILE)
+    return key
+
+
+def photo_data_uri(path, max_px=2048):
+    """Photo -> data URI: EXIF rotation applied, shrunk to max_px, JPEG (PNG if transparent)."""
+    raw = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if raw is None:
+        raise SystemExit("cannot read " + path)
+    alpha = raw.ndim == 3 and raw.shape[2] == 4 and raw[..., 3].min() < 255
+    img = raw if alpha else cv2.imread(path, cv2.IMREAD_COLOR)     # IMREAD_COLOR applies EXIF
+    k = min(1.0, float(max_px) / max(img.shape[:2]))
+    if k < 1.0:
+        img = cv2.resize(img, (int(round(img.shape[1] * k)), int(round(img.shape[0] * k))),
+                         interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".png" if alpha else ".jpg", img,
+                           [] if alpha else [cv2.IMWRITE_JPEG_QUALITY, 92])
+    import base64
+    return "data:%s;base64,%s" % ("image/png" if alpha else "image/jpeg",
+                                  base64.b64encode(buf.tobytes()).decode("ascii"))
+
+
+def ai(photos, out_dir, model="hunyuan", height_mm=0.0, extra=None, timeout_min=15.0, log=print,
+       wait=None):
+    """photos {"front": path, ...} -> fal -> model file in out_dir -> check(). Returns the check info."""
+    if model not in R.PRESETS:
+        raise SystemExit("model must be one of: " + ", ".join(sorted(R.PRESETS)))
+    preset = dict(R.PRESETS[model])
+    preset["name"] = model
+    key = fal_key()
+    uris = dict((v, photo_data_uri(p)) for v, p in photos.items())
+    for v, p in photos.items():
+        log("photo %-5s %s (%.0f kB sent)" % (v, os.path.basename(p), len(uris[v]) * 0.75 / 1024))
+    try:
+        result, rid = R.fal_generate(preset, uris, key, extra, timeout_min, log, wait)
+    except R.ApiError as err:
+        fix = R.retry_preset(preset, str(err), uris)
+        if fix is None:
+            raise
+        log("fal rejected the request (nothing charged). Retrying once: " + fix["why"])
+        result, rid = R.fal_generate(fix["preset"], uris, key, None, timeout_min, log, wait)
+    if not os.path.isdir(out_dir):
+        os.makedirs(out_dir)
+    json.dump(result, open(os.path.join(out_dir, "fal_result.json"), "w"), indent=1)
+    best = R.choose_model_url(R.find_model_urls(result), preset.get("prefer"))
+    if best is None:
+        raise SystemExit("fal finished but sent no model link - see fal_result.json")
+    ext, url = best
+    path = os.path.join(out_dir, "%s_%s%s" % (model, str(rid)[:8], ext))
+    log("download " + url.split("?")[0])
+    R.http_download(url, path)
+    info = check(path, out_dir, height_mm)
+    info.update({"model_file": path, "model_url": url, "request_id": rid, "fal_model": model})
+    return info
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd")
@@ -307,6 +377,16 @@ def main(argv=None):
     c.add_argument("--axis", default="height", help="the size is the height / width / depth / longest")
     c.add_argument("--up", default="auto", help="file up axis: auto / y / z / x")
     c.add_argument("--turn", type=float, default=0.0, help="turn about Z in degrees")
+    g = sub.add_parser("ai", help="photo(s) -> fal.ai 3D model -> check")
+    g.add_argument("front")
+    g.add_argument("--back", default="")
+    g.add_argument("--left", default="")
+    g.add_argument("--right", default="")
+    g.add_argument("--model", default="hunyuan", help="hunyuan / tripo / tripo-quad / meshy")
+    g.add_argument("--extra", default="", help='extra fal options as JSON, e.g. {"face_count": 200000}')
+    g.add_argument("--height-mm", type=float, default=0.0)
+    g.add_argument("--out", default="ai_out")
+    g.add_argument("--timeout-min", type=float, default=15.0)
     a = ap.parse_args(argv)
     if a.cmd == "prep":
         names = [n.strip() for n in a.names.split(",") if n.strip()] or None
@@ -314,6 +394,11 @@ def main(argv=None):
             print(w)
     elif a.cmd == "check":
         print(json.dumps(check(a.model, a.out, a.height_mm, a.up, a.axis, a.turn), indent=1))
+    elif a.cmd == "ai":
+        photos = dict((v, p) for v, p in (("front", a.front), ("back", a.back), ("left", a.left),
+                                          ("right", a.right)) if p)
+        info = ai(photos, a.out, a.model, a.height_mm, R.parse_extra(a.extra), a.timeout_min)
+        print(json.dumps(info, indent=1))
     else:
         ap.print_help()
 

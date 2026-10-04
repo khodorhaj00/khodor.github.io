@@ -52,10 +52,12 @@ Results go on layers `S3D_Photo3D::Raw / Mesh / Quad / SubD / Polysurface`. Down
 ```
 python p3d_cloud.py prep sheet.png --sheet 4 --names front,right,back,left --out ai_in/
 python p3d_cloud.py check model.glb --height-mm 1800 --out checked/
+python p3d_cloud.py ai front.png --model hunyuan --height-mm 290 --out ai_out/
 ```
 
 - `prep`: cuts the object out on white, squares it and gives every view the same scale. For best AI results, use true front / back / left / right views, not 3/4 views.
 - `check`: reports size, closed, loose pieces and a 6-view picture, and writes a Z-up OBJ + STL in mm.
+- `ai`: sends photo(s) to fal.ai with the same presets as the Rhino script, downloads the model and runs `check`. It needs the fal hosts allowed in the cloud environment and the key in `FAL_KEY` or `~/.config/styro3d/fal_key.txt`, never in the repo.
 
 ## Tests (`../tests/test_photo3d.py`, all pass)
 

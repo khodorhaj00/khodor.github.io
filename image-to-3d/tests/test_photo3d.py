@@ -349,10 +349,25 @@ lst = R.retry_preset({"app": "a/b", "views": {"front": "image"}, "extra": {}},
                      'POST x\nHTTP Error 422\n{"detail": [{"type": "missing", "loc": ["body", "image_urls"]}]}',
                      {"front": uri})
 assert R.build_payload(lst["preset"], {"front": uri})[1] == {"image_urls": [uri]}
+# the cloud one-command test: photo -> fal -> model file -> check
+sys.path.insert(0, os.path.join(HERE, "..", "views_to_3d"))
+import p3d_cloud as PC  # noqa: E402
+os.environ["FAL_KEY"] = "env-key"
+jpg = os.path.join(TMP, "front.jpg")
+cv2.imwrite(jpg, np.full((3000, 2000, 3), 200, np.uint8))
+STATE["polls"] = 0
+info = PC.ai({"front": jpg}, os.path.join(TMP, "ai_out"), "hunyuan", 100.0, log=lines.append,
+             wait=lambda s: None)
+sent = STATE["body"]["input_image_url"]
+im = cv2.imdecode(np.frombuffer(base64.b64decode(sent.split(",", 1)[1]), np.uint8), cv2.IMREAD_COLOR)
+assert sent.startswith("data:image/jpeg;base64,") and im.shape[:2] == (2048, 1365), im.shape
+assert STATE["auth"] == "Key env-key" and info["request_id"] == "r123" and os.path.isfile(info["model_file"])
+assert abs(info["size_mm"][2] - 100.0) < 1e-6 and os.path.isfile(info["views_png"])
 srv.shutdown()
 print("4 fal protocol: submit -> IN_QUEUE -> IN_PROGRESS -> COMPLETED -> result -> GLB download; "
       "key header + data-URI photo sent; 422 shows the server's message; a 422 for a wrong image "
-      "field / forbidden option is fixed by one automatic retry")
+      "field / forbidden option is fixed by one automatic retry; cloud 'ai' command: photo shrunk to "
+      "2048 px, sent, model downloaded and checked")
 
 # ------------------------------------------------------------------ 5 cloud helper: check + prep
 sys.path.insert(0, os.path.join(HERE, "..", "views_to_3d"))
